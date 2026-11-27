@@ -47,6 +47,7 @@ static struct {
 static uint32_t seed = 12345;
 static float rnd() { seed = seed * 1664525u + 1013904223u; return (seed >> 8) / 16777216.0f; }
 static float sand_y[CW];
+static void init_water();
 
 static void stock(float hunger) {
   static const int KINDS[FISH] = {CLOWN, TANG, YELLOW, NEON, NEON};
@@ -63,6 +64,7 @@ void pet_init(uint32_t now) {
   for (auto &h : S.hist) h = {-100, -100, false};
   stock(0.3f);
   for (int x = 0; x < CW; x++) sand_y[x] = SAND + sinf(x * 0.08f) * 2.5f + sinf(x * 0.21f + 1) * 1.0f;
+  init_water();
 }
 
 void pet_get_save(PetSave &s) {
@@ -222,27 +224,32 @@ static void line(float x0, float y0, float x1, float y1, uint16_t c) {
   for (int i = 0; i <= n; i++) px((int)(x0 + (x1 - x0) * i / n), (int)(y0 + (y1 - y0) * i / n), c);
 }
 
-static uint16_t water_at(int x, int y) {
-  float d = (y - SURFACE) / (float)(SAND - SURFACE);
-  uint16_t c = mix(rgb(120, 205, 228), rgb(22, 72, 132), d);
-  int band = (x + y / 2) % 46;  // static light rays from the surface
-  if (band < 9 && d < 0.75f) c = mix(c, WHITE, 0.09f * (1 - d / 0.75f));
-  return c;
+// Water gradient and its ray-lit variant, one colour per row; per-pixel float maths here cost ~30 ms a frame.
+static uint16_t water_row[CH], ray_row[CH];
+
+static void init_water() {
+  for (int y = 0; y < CH; y++) {
+    float d = fmaxf(0, (y - SURFACE) / (float)(SAND - SURFACE));
+    water_row[y] = mix(rgb(120, 205, 228), rgb(22, 72, 132), fminf(1, d));
+    ray_row[y] = d < 0.75f ? mix(water_row[y], WHITE, 0.09f * (1 - d / 0.75f)) : water_row[y];
+  }
 }
 
 static void draw_background(float t) {
-  for (int y = 0; y < CH; y++)
-    for (int x = 0; x < CW; x++) {
-      uint16_t c;
-      float surf = SURFACE + sinf(t * 1.8f + x * 0.18f) * 1.2f;
-      if (y < surf - 1) c = AIR;
-      else if (y < surf + 0.5f) c = rgb(190, 235, 245);
-      else if (y >= sand_y[x]) {
+  for (int x = 0; x < CW; x++) {
+    int surf = (int)roundf(SURFACE + sinf(t * 1.8f + x * 0.18f) * 1.2f), sand = (int)sand_y[x];
+    uint16_t *p = C + x;
+    for (int y = 0; y < CH; y++, p += CW) {
+      if (y < surf) *p = AIR;
+      else if (y == surf) *p = rgb(190, 235, 245);
+      else if (y >= sand) {
         uint32_t h = (x * 73856093u) ^ (y * 19349663u);
-        c = (h % 11 == 0) ? rgb(190, 165, 115) : (h % 17 == 0) ? rgb(240, 225, 185) : rgb(222, 200, 150);
-      } else c = water_at(x, y);
-      C[y * CW + x] = c;
+        *p = (h % 11 == 0) ? rgb(190, 165, 115) : (h % 17 == 0) ? rgb(240, 225, 185) : rgb(222, 200, 150);
+      } else {
+        *p = (x + y / 2) % 46 < 9 ? ray_row[y] : water_row[y];  // static light rays from the surface
+      }
     }
+  }
   // rocks with the bubbler on top
   ell(24, 141, 15, 9, OUTLINE);
   ell(24, 141, 14, 8, rgb(120, 125, 135));
