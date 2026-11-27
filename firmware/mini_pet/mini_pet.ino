@@ -17,6 +17,7 @@ constexpr uint32_t FRAME_MS = 1000 / 24, SAVE_MS = 5 * 60 * 1000;
 static uint16_t canvas[CW * CH];
 static uint32_t beep_until = 0, next_sample = 0, next_log = 0, next_frame = 0, next_save = SAVE_MS, saved_ts = 0;
 static bool was_down = false, net_up = false, clock_synced = false;
+static uint32_t frames = 0, draw_us = 0, wait_us = 0, push_us = 0;  // per-second frame timing for the log
 static Preferences prefs;
 
 static uint32_t wall_clock() {
@@ -179,10 +180,13 @@ void loop() {
   in.sig = sig;
   in.base = base;
   if (now >= next_log) {
-    logf("sig %d base %d\n", sig, base);
+    logf("sig %d base %d | %u fps, draw %u us, vsync wait %u us, push %u us\n", sig, base, frames, frames ? draw_us / frames : 0,
+         frames ? wait_us / frames : 0, frames ? push_us / frames : 0);
+    frames = draw_us = wait_us = push_us = 0;
     next_log = now + 1000;
   }
 
+  uint32_t t0 = micros();
   PetOutput out;
   pet_update(in, out);
   if (out.fed) logf("food!\n");
@@ -214,8 +218,12 @@ void loop() {
   }
 
   pet_draw(canvas, now);
+  uint32_t t1 = micros();
   board_wait_vsync();
+  uint32_t t2 = micros();
   present();
+  uint32_t t3 = micros();
+  frames++, draw_us += t1 - t0, wait_us += t2 - t1, push_us += t3 - t2;
   next_frame += FRAME_MS;
   int32_t wait = (int32_t)(next_frame - millis());
   if (wait > 0) delay(wait);
