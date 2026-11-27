@@ -13,9 +13,9 @@
 #endif
 
 constexpr int S = LCD_W / CW;  // canvas scale, 4x
-constexpr uint32_t FRAME_MS = 1000 / 24, SAVE_MS = 5 * 60 * 1000;
+constexpr uint32_t SAVE_MS = 5 * 60 * 1000;
 static uint16_t canvas[CW * CH];
-static uint32_t beep_until = 0, next_sample = 0, next_log = 0, next_frame = 0, next_save = SAVE_MS, saved_ts = 0;
+static uint32_t beep_until = 0, next_sample = 0, next_log = 0, next_save = SAVE_MS, saved_ts = 0;
 static bool was_down = false, net_up = false, clock_synced = false;
 static uint32_t frames = 0, draw_us = 0, wait_us = 0, push_us = 0;  // per-second frame timing for the log
 static Preferences prefs;
@@ -157,7 +157,16 @@ void setup() {
   logf("mini-pet ready\n");
 }
 
+// Paced by the panel (~42 Hz): push the frame drawn last time right after vsync, then draw the next one
+// while the panel scans out; waiting and drawing no longer add up.
 void loop() {
+  static bool drawn = false;
+  uint32_t tw = micros();
+  board_wait_vsync();
+  uint32_t tp = micros();
+  if (drawn) present();
+  wait_us += tp - tw, push_us += micros() - tp;
+
   uint32_t now = millis();
   net_loop(now);
 
@@ -218,14 +227,6 @@ void loop() {
   }
 
   pet_draw(canvas, now);
-  uint32_t t1 = micros();
-  board_wait_vsync();
-  uint32_t t2 = micros();
-  present();
-  uint32_t t3 = micros();
-  frames++, draw_us += t1 - t0, wait_us += t2 - t1, push_us += t3 - t2;
-  next_frame += FRAME_MS;
-  int32_t wait = (int32_t)(next_frame - millis());
-  if (wait > 0) delay(wait);
-  else next_frame = millis();
+  drawn = true;
+  frames++, draw_us += micros() - t0;
 }
