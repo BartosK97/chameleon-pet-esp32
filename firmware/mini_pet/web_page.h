@@ -43,7 +43,7 @@ form{display:flex;gap:8px}input{flex:1;padding:12px;border-radius:12px;border:0;
 <script>
 const $ = id => document.getElementById(id);
 const view = $('view'), ctx = view.getContext('2d');
-let img = ctx.createImageData(120, 160);  // resized when the device turns to landscape
+let img = ctx.createImageData(120, 160);
 async function frame() {
   try {
     const px = new Uint16Array(await (await fetch('/frame')).arrayBuffer());

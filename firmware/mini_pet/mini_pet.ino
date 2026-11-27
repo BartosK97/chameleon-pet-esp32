@@ -27,6 +27,8 @@ static const char *TIMEZONE = "CET-1CEST,M3.5.0,M10.5.0/3";  // lamp schedule fo
 alignas(4) static uint16_t canvas[CW * CH];
 static uint32_t beep_until = 0, next_sample = 0, next_log = 0, next_alert = 0, next_save = SAVE_MS, saved_ts = 0;
 static bool was_down = false, net_up = false, clock_synced = false;
+static const uint32_t SLEEP_MS = 5 * 60 * 1000;  // screen goes dark after this long without touch, phone, movement or web use
+static volatile uint32_t last_active = 0;
 static uint32_t frames = 0, draw_us = 0, wait_us = 0, push_us = 0, pre_us = 0, paint_us = 0;  // per-second frame timing for the log
 static Preferences prefs;
 
@@ -331,14 +333,12 @@ static void web_setup() {
   web.on("/", HTTP_GET, [] { web.send(200, "text/html", WEB_PAGE); });
   web.on("/status", HTTP_GET, [] {
     PetStatus st;
-    int w, h;
     xSemaphoreTake(pet_mux, portMAX_DELAY);
     pet_status(st);
-    pet_size(w, h);
     xSemaphoreGive(pet_mux);
     char b[200];
     snprintf(b, sizeof b, "{\"w\":%d,\"h\":%d,\"alive\":%d,\"dead\":%d,\"young\":%d,\"hunger\":%.2f,\"hunger_max\":%.2f,\"visitors\":%d,\"lamp\":%s,\"fps\":%u}",
-             w, h, st.alive, st.dead, st.young, st.hunger_avg, st.hunger_max, st.visitors_today, st.lamp_on ? "true" : "false", last_fps);
+             CW, CH, st.alive, st.dead, st.young, st.hunger_avg, st.hunger_max, st.visitors_today, st.lamp_on ? "true" : "false", last_fps);
     web.send(200, "application/json", b);
   });
   web.on("/fish", HTTP_GET, [] {
@@ -360,6 +360,7 @@ static void web_setup() {
     String q = web.arg("plain").substring(0, 200);
     xSemaphoreTake(pet_mux, portMAX_DELAY);
     int fish = pick_fish();
+    last_active = millis();
     xSemaphoreGive(pet_mux);
     JsonDocument doc;
     if (fish < 0 || !q.length()) {
@@ -380,13 +381,14 @@ static void web_setup() {
   });
   web.on("/feed", HTTP_POST, [] {
     xSemaphoreTake(pet_mux, portMAX_DELAY);
-    bool ok = pet_feed(millis());
+    bool ok = pet_feed(last_active = millis());
     xSemaphoreGive(pet_mux);
     web.send(200, "application/json", ok ? "{\"ok\":true}" : "{\"ok\":false}");
   });
   web.on("/lamp", HTTP_POST, [] {
     xSemaphoreTake(pet_mux, portMAX_DELAY);
     pet_toggle_lamp();
+    last_active = millis();
     xSemaphoreGive(pet_mux);
     web.send(200, "application/json", "{\"ok\":true}");
   });
@@ -425,6 +427,10 @@ static void net_loop(uint32_t now) {
     web_setup();
     logf("wifi %s  ota: mini-pet.local  log: nc mini-pet.local 23\n", WiFi.localIP().toString().c_str());
   }
+  static uint32_t lost_since = 0;  // the stack's own reconnect gave up twice in a day; kick it after 30 s offline
+  if (WiFi.status() == WL_CONNECTED) lost_since = 0;
+  else if (!lost_since) lost_since = now;
+  else if (now - lost_since > 30000) WiFi.disconnect(), WiFi.begin(WIFI_SSID, WIFI_PASS), lost_since = now;
   if (!net_up) return;
   ArduinoOTA.handle();
   if (log_server.hasClient()) {
@@ -435,7 +441,7 @@ static void net_loop(uint32_t now) {
 }
 
 // Only changed blocks touch PSRAM: full 600 KB redraws starve the panel's scanout once BLE runs.
-// Which screen edge points down: 0 bottom (portrait), 1 right, 2 top, 3 left. Odd = landscape canvas (CH x CW).
+// Which screen edge points down: 0 bottom (portrait), 1 right, 2 top, 3 left. Fish and HUD turn upright for it.
 static int orient = 0;
 static uint16_t *shown;  // last pushed canvas; in PSRAM, internal RAM is nearly gone with WiFi+BLE
 static bool shown_valid = false;
@@ -443,8 +449,6 @@ static bool shown_valid = false;
 static void present() {
   uint16_t *fb = board_fb();
   const uint32_t *now2 = (const uint32_t *)canvas, *old2 = (const uint32_t *)shown;
-  int w, h;
-  pet_size(w, h);
   for (int i = 0; i < CW * CH; i++) {
     if (shown_valid && !(i & 1) && now2[i / 2] == old2[i / 2]) {  // two unchanged pixels at once
       i++;
@@ -453,13 +457,7 @@ static void present() {
     uint16_t c = canvas[i];
     if (shown_valid && shown[i] == c) continue;
     shown[i] = c;
-    int u = i % w * S, v = i / w * S, sx, sy;  // canvas block, rotated onto the portrait panel
-    switch (orient) {
-      case 0: sx = u, sy = v; break;
-      case 1: sx = v, sy = LCD_H - S - u; break;
-      case 2: sx = LCD_W - S - u, sy = LCD_H - S - v; break;
-      default: sx = LCD_W - S - v, sy = u; break;
-    }
+    int sx = i % CW * S, sy = i / CW * S;
     uint32_t cc = c | (uint32_t)c << 16, *p = (uint32_t *)(fb + sy * LCD_W + sx);  // S == 4: two words per row
     for (int k = 0; k < S; k++, p += LCD_W / 2) p[0] = p[1] = cc;
   }
@@ -485,7 +483,7 @@ void setup() {
 
   pet_mux = xSemaphoreCreateMutex();
   snapshot = (uint16_t *)heap_caps_malloc(sizeof canvas, MALLOC_CAP_SPIRAM);
-  pet_init(millis(), (uint16_t *)heap_caps_malloc(CW * CH * 2, MALLOC_CAP_SPIRAM));
+  pet_init(millis(), (uint8_t *)heap_caps_malloc(PET_SCRATCH, MALLOC_CAP_SPIRAM));
   prefs.begin("mini-pet");
   PetSave s;
   if (prefs.getBytes("pet", &s, sizeof s) == sizeof s) pet_load(s);
@@ -529,22 +527,19 @@ void loop() {
   bool down = board_touch(tx, ty);
   PetInput in = {};
   in.now = now, in.tap = down && !was_down;
-  switch (orient) {  // panel touch to canvas pixels
-    case 0: in.tx = tx / S, in.ty = ty / S; break;
-    case 1: in.tx = (LCD_H - 1 - ty) / S, in.ty = tx / S; break;
-    case 2: in.tx = (LCD_W - 1 - tx) / S, in.ty = (LCD_H - 1 - ty) / S; break;
-    default: in.tx = ty / S, in.ty = (LCD_W - 1 - tx) / S; break;
-  }
+  in.tx = tx / S, in.ty = ty / S;
   was_down = down;
 
   static float gx = 0, gy = 1, ax = 0, ay = 0, az = 1;
   static uint32_t shake_until = 0;
-  if (board_accel(ax, ay, az)) {
+  bool moved = false;
+  if (float px = ax, py = ay, pz = az; board_accel(ax, ay, az)) {
+    moved = fabsf(ax - px) + fabsf(ay - py) + fabsf(az - pz) > 0.08f;  // picked up or nudged; the noise at rest is ~0.01
     gx += (SCREEN_GX(ax, ay, az) - gx) * 0.15f, gy += (SCREEN_GY(ax, ay, az) - gy) * 0.15f;
     float jolt = fabsf(sqrtf(ax * ax + ay * ay + az * az) - 1);  // 0 at rest, whatever the orientation
     if (jolt > 0.9f && now > shake_until) in.shake = true, shake_until = now + 1500;
   }
-  // Turn the canvas when another edge clearly points down for 0.6 s; lying flat keeps the current orientation.
+  // Turn fish and HUD when another edge clearly points down for 0.6 s; lying flat keeps the current orientation.
   static int want = 0;
   static uint32_t want_since = 0;
   int next_orient = orient;
@@ -554,8 +549,7 @@ void loop() {
     else if (cand != want) want = cand, want_since = now;
     else if (now - want_since > 600) next_orient = cand;
   }
-  in.gx = orient == 0 ? gx : orient == 1 ? -gy : orient == 2 ? -gx : gy;  // gravity in canvas axes
-  in.gy = orient == 0 ? gy : orient == 1 ? gx : orient == 2 ? -gy : -gx;
+  in.gx = gx, in.gy = gy, in.rot = orient;
 
   uint32_t tq = micros();
   static int minute = -1, day = -1;
@@ -591,12 +585,10 @@ void loop() {
   uint32_t t0 = micros();
   PetOutput out;
   xSemaphoreTake(pet_mux, portMAX_DELAY);
-  if (next_orient != orient) {
-    orient = next_orient;
-    pet_set_landscape(orient & 1);
-    shown_valid = false;
-    logf("orientation %d\n", orient);
-  }
+  if (next_orient != orient) orient = next_orient, in.rot = orient, logf("orientation %d\n", orient);
+  bool lit = now - last_active < SLEEP_MS;
+  if (down || moved || in.approach || in.shake) last_active = now;
+  if (!lit) in.tap = false;  // the first touch on a dark screen only wakes it
   pet_update(in, out);
   static int last_orient = 0, feeds_today = 0, births_today = 0, deaths_today = 0, counted_day = -1, diary_day = -1;
   static uint32_t tilt_since = 0;
@@ -615,7 +607,8 @@ void loop() {
   if (out.tapped_fish >= 0) request_line(SIT_TAP, out.tapped_fish, true, now);
   if (in.shake) request_line(SIT_SHAKE, -1, true, now);
   if (orient != last_orient) last_orient = orient, request_line(SIT_TURN, -1, true, now);
-  tilt_since = fabsf(in.gx) > 0.4f ? (tilt_since ? tilt_since : now) : 0;
+  float side = orient == 0 ? gx : orient == 1 ? -gy : orient == 2 ? -gx : gy;  // tilt across the upright view
+  tilt_since = fabsf(side) > 0.4f ? (tilt_since ? tilt_since : now) : 0;
   if (tilt_since && now - tilt_since > 1500) request_line(SIT_TILT, -1, false, now);
   if (ps.lamp_on && now > next_idle) request_line(SIT_IDLE, -1, false, now);
   if (jobs && minute == 21 * 60 && day != diary_day && clock_synced) {  // evening diary push
@@ -654,8 +647,10 @@ void loop() {
     else if (st.hunger_max < 0.4f) alert = 0;
   }
   if (out.events) next_save = min(next_save, now + 5000);
-  static int backlight = -1;
-  if (abs(out.backlight - backlight) >= 2) board_backlight(backlight = out.backlight);
+  static int backlight = -1;  // fades out over ~2 s when idle, back in within a few frames
+  int bl_want = now - last_active < SLEEP_MS ? out.backlight : 0;
+  int bl = backlight < 0 ? bl_want : bl_want < backlight ? backlight - 1 : min(bl_want, backlight + 5);
+  if (bl != backlight) board_backlight(backlight = bl);
 
   if (!clock_synced && wall_clock()) {  // catch up on the time spent powered off
     clock_synced = true;

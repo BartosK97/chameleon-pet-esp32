@@ -8,7 +8,7 @@ A pixel-art aquarium on a 2.8" touch display. To feed the fish, you walk up to i
 
 <p align="center"><img src="docs/aquarium.png" width="240" alt="Aquarium animation: fish swim, a phone comes close, food rains down, fish eat"></p>
 
-![Day, tap on the glass, phone brought close, tilted and shaken, night with the lamp off, offspring, landscape](docs/preview.png)
+![Day, tap on the glass, phone brought close, tilted and shaken, night with the lamp off, offspring, turned onto its side mid-turn, settled](docs/preview.png)
 
 ## What it does
 
@@ -16,8 +16,9 @@ A pixel-art aquarium on a 2.8" touch display. To feed the fish, you walk up to i
 - **Fish with needs.** Hungry fish chase the flakes and turn pale when they starve. A fish dies after 24 hours without food. Dead fish turn grey, roll belly up and float to the surface.
 - **Touch the glass.** A tap sends a ripple across the water and nearby fish dart away. Tap a dead fish to scoop it out. Tap the empty tank to stock five new fish.
 - **Remembers everything.** Fish state is saved to flash. After a power cut, the time spent powered off is caught up via NTP, so pulling the plug doesn't help.
-- **Real water.** The surface stays level when you tilt the device and sloshes back. Shake it and the sand swirls up and the fish scatter.
-- **Turn it sideways.** Hold it in landscape (or upside down) and the whole tank rotates and relayouts: wider, flatter, with the HUD and lamp moved along. Touch and tilt follow the rotation.
+- **Real water and sand.** The surface stays level in any pose and sloshes back. The sand is a grain simulation: turn the device on its side or upside down and it slides over grain by grain and settles against the new bottom. Shake it and the top layer swirls up and sinks back.
+- **Turn it sideways.** Fish, snail, HUD and speech bubbles turn smoothly to stay upright for you; the seaweed bends round to float upwards.
+- **Sleeps when nobody is around.** After 5 minutes without a touch, a phone or movement the screen fades out. Any of those wakes it; the first touch only wakes it.
 - **Day and night.** A tank lamp switches on at 07:00 and off at 22:00 local time; tap the lamp to switch it yourself. At night the tank and backlight dim and the fish sleep near the bottom.
 - **Offspring.** A fish that stays well fed for three days gets a baby, which grows to full size over two days.
 - **A snail** cleans up flakes that sink to the sand.
@@ -113,7 +114,9 @@ c++ -std=c++17 -O2 tools/preview.cpp -o preview
 | `BREED_FED_S`, `GROW_PER_S` | `pet.cpp` | 3 days well fed, 2 days to grow up |
 | `LAMP_ON_MIN`, `LAMP_OFF_MIN`, `TIMEZONE` | `pet.cpp`, `mini_pet.ino` | 07:00, 22:00, Europe/Vienna |
 | `SCREEN_GX`, `SCREEN_GY` | `mini_pet.ino` | maps the IMU axes to the screen; flip a sign if the water tilts the wrong way |
-| orientation hysteresis | `mini_pet.ino` | another edge must point down clearly for 0.6 s; lying flat keeps the current one |
+| orientation hysteresis | `mini_pet.ino` | another edge must point down clearly for 0.6 s before fish and HUD turn; lying flat keeps the current one |
+| `REPOSE`, `SAND_STEPS_PER_S` | `pet.cpp` | sand slides on slopes steeper than ~26°, 40 grain steps per second |
+| `SLEEP_MS` | `mini_pet.ino` | screen off after 5 min idle |
 
 ## Notes for ESP32-S3 RGB panels
 
@@ -125,7 +128,7 @@ The RGB panel reads its frame buffer out of PSRAM continuously. With WiFi and BL
 - **Bounce buffers** of 20 lines, and `WiFi.persistent(false)` so the WiFi stack never writes to flash.
 - **GT911 touch:** hold INT low during reset, or its I2C address comes up as 0x5D or 0x14 at random.
 - **Panel ISR on core 0.** The bounce-buffer ISR copies the frame out of PSRAM nonstop and runs on the core that created the panel, so the panel is created on core 0 and the game keeps core 1 to itself.
-- **Cheap painting.** The static scene is rendered once and copied each frame. Ellipses take one `sqrt` per row, overlays blend with bit tricks, and the push writes two pixels per 32-bit store. A frame paints in about 5 ms.
+- **Cheap painting.** Water is coloured per pixel from a depth lookup along gravity, the wave only near the surface, and the sand grid sleeps once it has settled. Ellipses take one `sqrt` per row, overlays blend with bit tricks, and the push writes two pixels per 32-bit store.
 - **Paced by vsync.** The frame is pushed right after vsync and the next one is drawn while the panel scans out, giving 43 fps (the panel's refresh rate).
 - **Web server on core 0** with a mutex around the game state, so serving the 38 KB live frame never stalls the animation.
 - **QMI8658:** the accelerometer only produces data with Waveshare's CTRL7 = 0x43. A read of 0x8000 on every axis means no sample yet.
@@ -139,7 +142,7 @@ The RGB panel reads its frame buffer out of PSRAM continuously. With WiFi and BL
 | `firmware/mini_pet/board.*` | Display, touch, IO expander, buzzer and backlight for the 2.8B |
 | `firmware/mini_pet/pet.*` | Aquarium simulation and pixel-art renderer |
 | `firmware/mini_pet/mini_pet.ino` | BLE approach detection, IMU, WiFi/OTA/NTP, web server, push, persistence, frame loop |
-| `firmware/mini_pet/web_page.h` | The page served at `mini-pet.local`; it follows the device into landscape |
+| `firmware/mini_pet/web_page.h` | The page served at `mini-pet.local` |
 | `firmware/mini_pet/ai.*` | HTTPS calls to the Claude Messages API and ntfy |
 | `firmware/mini_pet/talk.h` | Types for the fish-talk job queue |
 | `firmware/mini_pet/font_tomthumb.h` | 3×5 pixel font with Latin-1 for the speech bubbles |

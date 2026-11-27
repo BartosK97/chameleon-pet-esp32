@@ -2,7 +2,7 @@
 #pragma once
 #include <stdint.h>
 
-constexpr int CW = 120, CH = 160;  // portrait canvas; landscape uses CH x CW, same pixel count
+constexpr int CW = 120, CH = 160;  // portrait canvas, fixed; sand and water follow gravity, fish and HUD turn upright
 constexpr int FISH = 8;  // slots: 5 stocked, the rest for offspring
 
 // Approach = one BLE device rising this much above its own slow baseline, ending above APPROACH_MIN.
@@ -15,7 +15,8 @@ struct PetInput {
   bool sample;    // new signal sample this frame (every 250 ms)
   int sig, base;  // strongest device now and its slow baseline, dBm (-100 = nothing)
   bool approach;  // some device just came close
-  float gx, gy;   // gravity in screen axes, g: +x right, +y down (0,0 = lying flat or no IMU)
+  float gx, gy;   // gravity in portrait canvas axes, g: +x right, +y down (0,0 = lying flat or no IMU)
+  int rot;        // edge pointing down for fish and HUD: 0 bottom, 1 right, 2 top, 3 left
   bool shake;     // device was shaken this frame
   int minute;     // local minutes since midnight, -1 = clock unknown
   int day;        // local day number, -1 = clock unknown
@@ -48,7 +49,8 @@ struct PetSave {
 };
 constexpr uint32_t PET_SAVE_MAGIC = 0xF15A0002;
 
-void pet_init(uint32_t now, uint16_t *bg_buffer);  // bg_buffer: CW*CH scratch for the static scene (PSRAM is fine)
+constexpr int PET_SCRATCH = CW * CH * 4 + 48 * 48 * 2;  // sand grid, turn layer, creature sprite
+void pet_init(uint32_t now, uint8_t *scratch);  // scratch: PET_SCRATCH bytes (PSRAM is fine)
 void pet_update(const PetInput &in, PetOutput &out);
 void pet_draw(uint16_t *canvas, uint32_t now);
 void pet_get_save(PetSave &s);
@@ -60,5 +62,3 @@ void pet_toggle_lamp();
 struct PetFish { int kind, state; float hunger, size; };  // kind: 0 clownfish, 1 tang, 2 yellow, 3 neon; state 1 alive, 2 dead
 bool pet_fish(int slot, PetFish &f);  // false for an empty slot
 void pet_say(int slot, const char *utf8, uint32_t now);  // speech bubble over that fish for a few seconds
-void pet_set_landscape(bool landscape);  // relayouts the tank; canvas becomes CH wide and CW tall
-void pet_size(int &w, int &h);  // current canvas size
