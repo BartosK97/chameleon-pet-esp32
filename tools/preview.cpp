@@ -7,9 +7,11 @@
 #include "../firmware/mini_pet/pet.cpp"
 
 static void emit(const std::vector<uint16_t> &canvas, std::vector<uint8_t> &img, int W, int ox, int scale) {
-  for (int y = 0; y < CH * scale; y++)
-    for (int x = 0; x < CW * scale; x++) {
-      uint16_t c = canvas[(y / scale) * CW + x / scale];
+  int cw, ch;
+  pet_size(cw, ch);
+  for (int y = 0; y < ch * scale; y++)
+    for (int x = 0; x < cw * scale; x++) {
+      uint16_t c = canvas[(y / scale) * cw + x / scale];
       uint8_t *p = &img[(y * W + ox + x) * 3];
       p[0] = (c >> 11) << 3, p[1] = ((c >> 5) & 63) << 2, p[2] = (c & 31) << 3;
     }
@@ -18,9 +20,9 @@ static void emit(const std::vector<uint16_t> &canvas, std::vector<uint8_t> &img,
 int main(int argc, char **argv) {
   const bool anim = argc > 1 && !strcmp(argv[1], "anim");
   const int scale = 2;
-  // day, tap ripple, phone brought close (food), tilted + shaken, night (lamp off, fish asleep), offspring + snail
-  const uint32_t shots[] = {800, 1300, 3000, 4700, 10000, 13000};
-  const int n = anim ? 1 : sizeof(shots) / sizeof(shots[0]), W = (CW * scale + (anim ? 0 : 4)) * n, H = CH * scale;
+  // day, tap ripple, phone brought close (food), tilted + shaken, night (lamp off, fish asleep), offspring + snail, landscape
+  const uint32_t shots[] = {800, 1300, 3000, 4700, 10000, 13000, 16000};
+  const int n = anim ? 1 : sizeof(shots) / sizeof(shots[0]), W = (CH * scale + (anim ? 0 : 4)) * n, H = CH * scale;  // cells fit landscape too
   std::vector<uint16_t> canvas(CW * CH);
   std::vector<uint8_t> img(W * H * 3, 255);
   static uint16_t scene[CW * CH];
@@ -44,6 +46,7 @@ int main(int argc, char **argv) {
       s.kind[6] = NEON, s.state[6] = ALIVE, s.size[6] = 0.6f, s.hunger[6] = 0.2f;
       pet_load(s);
     }
+    if (!anim && t == 13040) pet_set_landscape(true);
     PetOutput out;
     pet_update(in, out);
     if (anim) {
@@ -56,7 +59,7 @@ int main(int argc, char **argv) {
     }
     if (t < shots[shot]) continue;
     pet_draw(canvas.data(), t);
-    emit(canvas, img, W, shot * (CW * scale + 4), scale);
+    emit(canvas, img, W, shot * (CH * scale + 4), scale);
     shot++;
   }
   if (!anim) {

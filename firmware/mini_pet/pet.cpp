@@ -17,7 +17,8 @@ static const float BREED_FED_S = 72 * 3600;       // 3 days well fed (hunger < W
 static const float WELL_FED = 0.35f;
 static const int LAMP_ON_MIN = 7 * 60, LAMP_OFF_MIN = 22 * 60;
 static const float NIGHT = 0.5f;  // scene brightness with the lamp off; the backlight dims on top
-static const int SURFACE = 18, SAND = 140;
+static const int SURFACE = 18, MAXD = CW > CH ? CW : CH;
+static int W = CW, H = CH, SAND = CH - 20;  // landscape swaps W and H; the sand sits 20 px above the bottom
 static const int FLAKES = 24, BUBBLES = 14, DUST = 48, HIST = 112;
 
 static const uint16_t AIR = rgb(226, 240, 244), OUTLINE = rgb(20, 30, 45), WHITE = rgb(250, 250, 245);
@@ -65,7 +66,7 @@ static struct {
 
 static uint32_t seed = 12345;
 static float rnd() { seed = seed * 1664525u + 1013904223u; return (seed >> 8) / 16777216.0f; }
-static float sand_y[CW];
+static float sand_y[MAXD];
 static uint16_t *bg;  // static scene with a flat surface, rendered once; frames copy it
 static void init_scene();
 
@@ -73,7 +74,7 @@ static void init_scene();
 static uint16_t *C;
 
 static void px(int x, int y, uint16_t c) {
-  if (x >= 0 && x < CW && y >= 0 && y < CH) C[y * CW + x] = c;
+  if (x >= 0 && x < W && y >= 0 && y < H) C[y * W + x] = c;
 }
 
 static bool in_ell(float x, float y, float cx, float cy, float rx, float ry) {
@@ -86,14 +87,14 @@ static void ell(float cx, float cy, float rx, float ry, uint16_t c, int ya = -(1
   int y0 = (int)floorf(cy - ry - 1), y1 = (int)ceilf(cy + ry + 1);
   if (y0 < ya) y0 = ya;
   if (y1 > yb) y1 = yb;
-  for (int y = y0 < 0 ? 0 : y0; y <= y1 && y < CH; y++) {
+  for (int y = y0 < 0 ? 0 : y0; y <= y1 && y < H; y++) {
     float dy = (y + 0.5f - cy) / ry, k = 1 - dy * dy;
     if (k < 0) continue;
     float hw = rx * sqrtf(k);
     int xa = (int)ceilf(cx - hw - 0.5f), xb = (int)floorf(cx + hw - 0.5f);
     if (xa < 0) xa = 0;
-    if (xb > CW - 1) xb = CW - 1;
-    for (uint16_t *p = C + y * CW + xa, *e = C + y * CW + xb; p <= e; p++) *p = c;
+    if (xb > W - 1) xb = W - 1;
+    for (uint16_t *p = C + y * W + xa, *e = C + y * W + xb; p <= e; p++) *p = c;
   }
 }
 
@@ -102,7 +103,7 @@ static void line(float x0, float y0, float x1, float y1, uint16_t c) {
   for (int i = 0; i <= n; i++) px((int)(x0 + (x1 - x0) * i / n), (int)(y0 + (y1 - y0) * i / n), c);
 }
 
-static float surf_at(float x, float t) { return SURFACE + S.tilt * (x - CW / 2) + sinf(t * 1.8f + x * 0.18f) * 1.2f; }
+static float surf_at(float x, float t) { return SURFACE + S.tilt * (x - W / 2) + sinf(t * 1.8f + x * 0.18f) * 1.2f; }
 
 static Fish make_fish(int kind, float x, float y, float size) {
   Fish f = {};
@@ -113,7 +114,7 @@ static Fish make_fish(int kind, float x, float y, float size) {
 
 static void stock() {
   static const int KINDS[] = {CLOWN, TANG, YELLOW, NEON, NEON};
-  for (int i = 0; i < FISH; i++) S.fish[i] = i < 5 ? make_fish(KINDS[i], 20 + rnd() * 80, 40 + rnd() * 80, 1) : Fish{};
+  for (int i = 0; i < FISH; i++) S.fish[i] = i < 5 ? make_fish(KINDS[i], 20 + rnd() * (W - 40), 40 + rnd() * (SAND - 60), 1) : Fish{};
 }
 
 void pet_init(uint32_t now, uint16_t *bg_buffer) {
@@ -123,7 +124,7 @@ void pet_init(uint32_t now, uint16_t *bg_buffer) {
   S.last_visitor = now - VISITOR_GAP;
   for (auto &h : S.hist) h = {-100, -100, false};
   stock();
-  for (int x = 0; x < CW; x++) sand_y[x] = SAND + sinf(x * 0.08f) * 2.5f + sinf(x * 0.21f + 1) * 1.0f;
+  for (int x = 0; x < W; x++) sand_y[x] = SAND + sinf(x * 0.08f) * 2.5f + sinf(x * 0.21f + 1) * 1.0f;
   init_scene();
 }
 
@@ -141,7 +142,7 @@ void pet_load(const PetSave &s) {
   if (s.magic != PET_SAVE_MAGIC) return;
   for (int i = 0; i < FISH; i++) {
     Fish &f = S.fish[i];
-    f = make_fish(s.kind[i] % 4, 20 + rnd() * 80, 40 + rnd() * 80, s.size[i]);
+    f = make_fish(s.kind[i] % 4, 20 + rnd() * (W - 40), 40 + rnd() * (SAND - 60), s.size[i]);
     f.state = s.state[i], f.hunger = s.hunger[i], f.fed_s = s.fed_s[i];
   }
   S.visitors = s.visitors, S.visitor_day = s.visitor_day;
@@ -173,8 +174,8 @@ void pet_status(PetStatus &s) {
 }
 
 static void new_target(Fish &f, uint32_t now, bool sleepy) {
-  f.tx = 10 + rnd() * 100;
-  f.ty = sleepy ? 100 + rnd() * 30 : 30 + rnd() * 96;
+  f.tx = 10 + rnd() * (W - 20);
+  f.ty = sleepy ? SAND - 40 + rnd() * 30 : 30 + rnd() * (SAND - 44);
   f.retarget = now + (sleepy ? 6000 : 2500) + (uint32_t)(rnd() * 4000);
 }
 
@@ -185,7 +186,7 @@ static bool drop_food(uint32_t now) {
   for (auto &fl : S.flakes) {
     if (fl.live || n >= 12) continue;
     static const uint16_t C[] = {rgb(230, 120, 50), rgb(200, 70, 50), rgb(160, 110, 60)};
-    float x = 30 + rnd() * 60;
+    float x = W / 4 + rnd() * W / 2;
     fl = {x, surf_at(x, now / 1000.0f) - n * 1.5f, now / 1000.0f + rnd() * 6, true, C[n % 3]};
     n++;
   }
@@ -193,6 +194,21 @@ static bool drop_food(uint32_t now) {
 }
 
 bool pet_feed(uint32_t now) { return drop_food(now); }
+
+void pet_set_landscape(bool landscape) {
+  int w = landscape ? CH : CW, h = landscape ? CW : CH;
+  if (w == W) return;
+  W = w, H = h, SAND = h - 20;
+  for (int x = 0; x < W; x++) sand_y[x] = SAND + sinf(x * 0.08f) * 2.5f + sinf(x * 0.21f + 1) * 1.0f;
+  init_scene();
+  for (auto &f : S.fish) f.x = fminf(W - 10, f.x), f.y = fminf(SAND - 8, f.y), f.tx = f.x, f.ty = f.y;
+  for (auto &fl : S.flakes) fl.live &= fl.x < W - 3 && fl.y < SAND;
+  for (auto &b : S.bubbles) b.live = false;
+  for (auto &d : S.dust) d.live = false;
+  S.snail.x = S.snail.tx = fminf(W - 8, S.snail.x);
+}
+
+void pet_size(int &w, int &h) { w = W, h = H; }
 void pet_toggle_lamp() { S.lamp_on = !S.lamp_on; }
 
 static void startle(Fish &f, float fromx, float fromy, uint32_t now) {
@@ -243,9 +259,9 @@ void pet_update(const PetInput &in, PetOutput &out) {
   S.tilt_v += ((target - S.tilt) * 28 - S.tilt_v * 3.5f) * dt;
   S.tilt += S.tilt_v * dt;
 
-  if (in.tap && in.tx >= 96 && in.ty <= 14) {  // signal icon toggles the graph
+  if (in.tap && in.tx >= W - 24 && in.ty <= 14) {  // signal icon toggles the graph
     S.debug = !S.debug;
-  } else if (in.tap && in.tx >= 54 && in.tx < 96 && in.ty <= 12) {  // the lamp
+  } else if (in.tap && in.tx >= W - 66 && in.tx < W - 24 && in.ty <= 12) {  // the lamp
     S.lamp_on = !S.lamp_on;
     out.beep_ms = 8;
   } else if (in.tap) {
@@ -267,7 +283,7 @@ void pet_update(const PetInput &in, PetOutput &out) {
 
   if (in.shake) {  // stir up the sand, everyone panics
     for (auto &d : S.dust) {
-      float x = 4 + rnd() * (CW - 8);
+      float x = 4 + rnd() * (W - 8);
       d = {x, sand_y[(int)x] - 1, (rnd() - 0.5f) * 24, -12 - rnd() * 28, true};
     }
     for (auto &f : S.fish)
@@ -279,14 +295,14 @@ void pet_update(const PetInput &in, PetOutput &out) {
     if (!d.live) continue;
     d.vy += 14 * dt, d.vx *= 1 - fminf(1, 1.2f * dt);
     d.x += d.vx * dt, d.y += d.vy * dt;
-    if (d.x < 1 || d.x > CW - 2 || (d.vy > 0 && d.y >= sand_y[(int)d.x])) d.live = false;
+    if (d.x < 1 || d.x > W - 2 || (d.vy > 0 && d.y >= sand_y[(int)d.x])) d.live = false;
   }
 
   for (auto &fl : S.flakes) {
     if (!fl.live) continue;
     if (fl.y < sand_y[(int)fl.x] - 1) fl.y += 7 * dt, fl.x += sinf(t * 2 + fl.t0) * 3 * dt;
     else if (t - fl.t0 > 60) fl.live = false;  // rots on the sand unless the snail gets it
-    fl.x = fminf(CW - 3, fmaxf(2, fl.x));
+    fl.x = fminf(W - 3, fmaxf(2, fl.x));
   }
 
   // snail crawls along the sand towards settled flakes
@@ -294,7 +310,7 @@ void pet_update(const PetInput &in, PetOutput &out) {
   for (auto &fl : S.flakes)
     if (fl.live && fl.y >= sand_y[(int)fl.x] - 2 && (!crumb || fabsf(fl.x - S.snail.x) < fabsf(crumb->x - S.snail.x))) crumb = &fl;
   if (crumb) S.snail.tx = crumb->x;
-  else if (fabsf(S.snail.tx - S.snail.x) < 1) S.snail.tx = 50 + rnd() * 62;
+  else if (fabsf(S.snail.tx - S.snail.x) < 1) S.snail.tx = 50 + rnd() * (W - 58);
   float sdx = S.snail.tx - S.snail.x;
   if (fabsf(sdx) > 0.5f) S.snail.dir = sdx > 0 ? 1 : -1, S.snail.x += S.snail.dir * 2.2f * dt;
   if (crumb && fabsf(crumb->x - S.snail.x - S.snail.dir * 4) < 2) crumb->live = false;
@@ -306,7 +322,7 @@ void pet_update(const PetInput &in, PetOutput &out) {
     if (f.state == GONE) continue;
     if (f.state == DEAD) {  // belly up, drifting to the surface
       f.y += (surf_at(f.x, t) + 7 - f.y) * fminf(1, dt * 0.4f);
-      f.x = fminf(CW - 10, fmaxf(10, f.x + sinf(t * 0.4f + f.phase) * 2 * dt));
+      f.x = fminf(W - 10, fmaxf(10, f.x + sinf(t * 0.4f + f.phase) * 2 * dt));
       continue;
     }
     const Species &sp = SPECIES[f.kind];
@@ -340,7 +356,7 @@ void pet_update(const PetInput &in, PetOutput &out) {
     float k = fminf(1, dt * (startled ? 6 : 2.5f));
     f.vx += (dx / d * speed - f.vx) * k;
     f.vy += (dy / d * speed * 0.6f - f.vy) * k;
-    f.x = fminf(CW - 8, fmaxf(8, f.x + f.vx * dt));
+    f.x = fminf(W - 8, fmaxf(8, f.x + f.vx * dt));
     f.y = fminf(SAND - 6, fmaxf(surf_at(f.x, t) + 7, f.y + f.vy * dt));
     if (f.vx > 1.5f) f.dir = 1;
     if (f.vx < -1.5f) f.dir = -1;
@@ -354,7 +370,7 @@ void pet_update(const PetInput &in, PetOutput &out) {
 
   if (now > S.next_bubble) {
     for (auto &b : S.bubbles)
-      if (!b.live) { b = {24 + rnd() * 3, 132, 1 + rnd() * 1.6f, rnd() * 6.28f, true}; break; }
+      if (!b.live) { b = {24 + rnd() * 3, (float)SAND - 8, 1 + rnd() * 1.6f, rnd() * 6.28f, true}; break; }
     S.next_bubble = now + 250 + (uint32_t)(rnd() * 600);
   }
   for (auto &b : S.bubbles)
@@ -362,15 +378,15 @@ void pet_update(const PetInput &in, PetOutput &out) {
 }
 
 // Water gradient and its ray-lit variant, one colour per row.
-static uint16_t water_row[CH], ray_row[CH];
+static uint16_t water_row[MAXD], ray_row[MAXD];
 static const uint16_t SURF_C = rgb(190, 235, 245);
 static uint16_t weed_c[4][72], weed_e[4][72];
-static const float WEED_X[] = {80, 88, 97, 107}, WEED_H[] = {58, 72, 50, 64}, WEED_P[] = {0, 1.7f, 3.1f, 4.4f};
+static const float WEED_X[] = {40, 32, 23, 13}, WEED_H[] = {58, 72, 50, 64}, WEED_P[] = {0, 1.7f, 3.1f, 4.4f};  // X from the right edge
 
 static uint16_t water_px(int x, int y) { return (x + y / 2) % 46 < 9 ? ray_row[y] : water_row[y]; }  // static light rays
 
 static void init_scene() {
-  for (int y = 0; y < CH; y++) {
+  for (int y = 0; y < H; y++) {
     float d = fmaxf(0, (y - SURFACE) / (float)(SAND - SURFACE));
     water_row[y] = mix(rgb(120, 205, 228), rgb(22, 72, 132), fminf(1, d));
     ray_row[y] = d < 0.75f ? mix(water_row[y], WHITE, 0.09f * (1 - d / 0.75f)) : water_row[y];
@@ -382,38 +398,38 @@ static void init_scene() {
     }
   uint16_t *keep = C;
   C = bg;
-  for (int x = 0; x < CW; x++)
-    for (int y = 0; y < CH; y++) {
+  for (int x = 0; x < W; x++)
+    for (int y = 0; y < H; y++) {
       uint32_t h = (x * 73856093u) ^ (y * 19349663u);
-      C[y * CW + x] = y < SURFACE ? AIR : y == SURFACE ? SURF_C
+      C[y * W + x] = y < SURFACE ? AIR : y == SURFACE ? SURF_C
                     : y < (int)sand_y[x] ? water_px(x, y)
                     : (h % 11 == 0) ? rgb(190, 165, 115) : (h % 17 == 0) ? rgb(240, 225, 185) : SAND_C;
     }
-  ell(24, 141, 15, 9, OUTLINE);  // rocks with the bubbler on top
-  ell(24, 141, 14, 8, rgb(120, 125, 135));
-  ell(20, 137, 7, 3, rgb(150, 155, 165));
-  ell(44, 146, 8, 5, OUTLINE);
-  ell(44, 146, 7, 4, rgb(105, 110, 120));
+  ell(24, SAND + 1, 15, 9, OUTLINE);  // rocks with the bubbler on top
+  ell(24, SAND + 1, 14, 8, rgb(120, 125, 135));
+  ell(20, SAND - 3, 7, 3, rgb(150, 155, 165));
+  ell(44, SAND + 6, 8, 5, OUTLINE);
+  ell(44, SAND + 6, 7, 4, rgb(105, 110, 120));
   C = keep;
 }
 
 // Copy the cached scene, then only patch the rows the moving surface passes through.
 static void draw_background(float t) {
-  memcpy(C, bg, CW * CH * sizeof(uint16_t));
-  for (int x = 0; x < CW; x++) {
+  memcpy(C, bg, W * H * sizeof(uint16_t));
+  for (int x = 0; x < W; x++) {
     int surf = (int)floorf(surf_at(x, t) + 0.5f);
     uint16_t *p = C + x;
-    for (int y = SURFACE; y < surf && y < CH; y++) p[y * CW] = AIR;
-    for (int y = surf + 1 > 0 ? surf + 1 : 0; y <= SURFACE; y++) p[y * CW] = water_px(x, y);
-    if (surf >= 0 && surf < CH) p[surf * CW] = SURF_C;
+    for (int y = SURFACE; y < surf && y < H; y++) p[y * W] = AIR;
+    for (int y = surf + 1 > 0 ? surf + 1 : 0; y <= SURFACE; y++) p[y * W] = water_px(x, y);
+    if (surf >= 0 && surf < H) p[surf * W] = SURF_C;
   }
 }
 
 static void draw_seaweed(float t) {
   for (int s = 0; s < 4; s++)
-    for (int i = 0; i < (int)WEED_H[s]; i++) {
-      float y = sand_y[(int)WEED_X[s]] - i, f = i / WEED_H[s];
-      int x = (int)(WEED_X[s] + sinf(t * 1.2f + i * 0.08f + WEED_P[s]) * f * 4 + S.tilt * f * 10);
+    for (int i = 0; i < (int)fminf(WEED_H[s], SAND - 34); i++) {
+      float wx = W - WEED_X[s], y = sand_y[(int)wx] - i, f = i / WEED_H[s];
+      int x = (int)(wx + sinf(t * 1.2f + i * 0.08f + WEED_P[s]) * f * 4 + S.tilt * f * 10);
       uint16_t c = weed_c[s][i];
       px(x - 1, (int)y, weed_e[s][i]);
       px(x, (int)y, c);
@@ -492,20 +508,21 @@ static void draw_fish(const Fish &f, uint32_t now, bool sleepy) {
 static void apply_light() {
   if (S.light > 0.98f) return;
   int lr = (int)(S.light * 0.8f * 256), lg = (int)(S.light * 0.9f * 256), lb = (int)(fminf(1, S.light * 1.15f) * 256);
-  for (int i = 0; i < CW * CH; i++) {
+  for (int i = 0; i < W * H; i++) {
     uint16_t c = C[i];
     C[i] = ((((c >> 11) * lr) >> 8) << 11) | (((((c >> 5) & 63) * lg) >> 8) << 5) | (((c & 31) * lb) >> 8);
   }
 }
 
 static void draw_lamp() {
-  for (int x = 58; x <= 92; x++)
-    for (int y = 0; y <= 4; y++) px(x, y, (y == 4 || x == 58 || x == 92) ? OUTLINE : rgb(70, 76, 88));
-  for (int x = 61; x <= 89; x++) px(x, 5, S.lamp_on ? rgb(255, 215, 110) : rgb(95, 95, 100));
+  const int l = W - 62, r = W - 28;  // between the food bar and the signal icon
+  for (int x = l; x <= r; x++)
+    for (int y = 0; y <= 4; y++) px(x, y, (y == 4 || x == l || x == r) ? OUTLINE : rgb(70, 76, 88));
+  for (int x = l + 3; x <= r - 3; x++) px(x, 5, S.lamp_on ? rgb(255, 215, 110) : rgb(95, 95, 100));
   if (S.lamp_on)  // warm glow fanning out under the lamp
     for (int y = 6; y <= 9; y++)
-      for (int x = 61 - (y - 5) * 2; x <= 89 + (y - 5) * 2; x++)
-        if (C[y * CW + x] == AIR) px(x, y, mix(rgb(255, 225, 140), AIR, (y - 5) / 5.0f));
+      for (int x = l + 3 - (y - 5) * 2; x <= r - 3 + (y - 5) * 2; x++)
+        if (x >= 0 && x < W && C[y * W + x] == AIR) px(x, y, mix(rgb(255, 225, 140), AIR, (y - 5) / 5.0f));
 }
 
 static void draw_digits(int x, int y, int v, uint16_t c) {
@@ -537,7 +554,7 @@ static void draw_hud(uint32_t now) {
   for (int i = 0; i < 4; i++)
     for (int h = 0; h <= i * 2 + 1; h++)
       for (int w = 0; w < 2; w++)
-        px(100 + i * 4 + w, 10 - h, i < bars ? (hot ? rgb(230, 40, 80) : INK) : rgb(190, 200, 205));
+        px(W - 20 + i * 4 + w, 10 - h, i < bars ? (hot ? rgb(230, 40, 80) : INK) : rgb(190, 200, 205));
 }
 
 // Signal graph, oldest left: blue = strongest device, grey = its baseline, red dots = APPROACH_MIN, pink column = approach.
@@ -547,7 +564,7 @@ static void draw_graph() {
   for (int y = Y0 - 1; y <= Y0 + GH; y++)
     for (int x = X0 - 1; x <= X0 + HIST; x++)
       if (y == Y0 - 1 || y == Y0 + GH || x == X0 - 1 || x == X0 + HIST) px(x, y, rgb(200, 225, 235));
-      else px(x, y, ((C[y * CW + x] & 0xF7DE) >> 1) + ((WHITE & 0xF7DE) >> 1));  // 50 % white without float maths
+      else px(x, y, ((C[y * W + x] & 0xF7DE) >> 1) + ((WHITE & 0xF7DE) >> 1));  // 50 % white without float maths
   int prev = -1;
   for (int i = 0; i < HIST; i++) {
     const auto &h = S.hist[(S.hist_i + i) % HIST];

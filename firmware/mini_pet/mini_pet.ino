@@ -133,12 +133,14 @@ static void web_setup() {
   web.on("/", HTTP_GET, [] { web.send(200, "text/html", WEB_PAGE); });
   web.on("/status", HTTP_GET, [] {
     PetStatus st;
+    int w, h;
     xSemaphoreTake(pet_mux, portMAX_DELAY);
     pet_status(st);
+    pet_size(w, h);
     xSemaphoreGive(pet_mux);
     char b[200];
-    snprintf(b, sizeof b, "{\"alive\":%d,\"dead\":%d,\"young\":%d,\"hunger\":%.2f,\"hunger_max\":%.2f,\"visitors\":%d,\"lamp\":%s,\"fps\":%u}",
-             st.alive, st.dead, st.young, st.hunger_avg, st.hunger_max, st.visitors_today, st.lamp_on ? "true" : "false", last_fps);
+    snprintf(b, sizeof b, "{\"w\":%d,\"h\":%d,\"alive\":%d,\"dead\":%d,\"young\":%d,\"hunger\":%.2f,\"hunger_max\":%.2f,\"visitors\":%d,\"lamp\":%s,\"fps\":%u}",
+             w, h, st.alive, st.dead, st.young, st.hunger_avg, st.hunger_max, st.visitors_today, st.lamp_on ? "true" : "false", last_fps);
     web.send(200, "application/json", b);
   });
   web.on("/feed", HTTP_POST, [] {
@@ -191,12 +193,16 @@ static void net_loop(uint32_t now) {
 }
 
 // Only changed blocks touch PSRAM: full 600 KB redraws starve the panel's scanout once BLE runs.
+// Which screen edge points down: 0 bottom (portrait), 1 right, 2 top, 3 left. Odd = landscape canvas (CH x CW).
+static int orient = 0;
 static uint16_t *shown;  // last pushed canvas; in PSRAM, internal RAM is nearly gone with WiFi+BLE
 static bool shown_valid = false;
 
 static void present() {
   uint16_t *fb = board_fb();
   const uint32_t *now2 = (const uint32_t *)canvas, *old2 = (const uint32_t *)shown;
+  int w, h;
+  pet_size(w, h);
   for (int i = 0; i < CW * CH; i++) {
     if (shown_valid && !(i & 1) && now2[i / 2] == old2[i / 2]) {  // two unchanged pixels at once
       i++;
@@ -205,7 +211,14 @@ static void present() {
     uint16_t c = canvas[i];
     if (shown_valid && shown[i] == c) continue;
     shown[i] = c;
-    uint32_t cc = c | (uint32_t)c << 16, *p = (uint32_t *)(fb + (i / CW) * S * LCD_W + (i % CW) * S);  // S == 4: two words per row
+    int u = i % w * S, v = i / w * S, sx, sy;  // canvas block, rotated onto the portrait panel
+    switch (orient) {
+      case 0: sx = u, sy = v; break;
+      case 1: sx = v, sy = LCD_H - S - u; break;
+      case 2: sx = LCD_W - S - u, sy = LCD_H - S - v; break;
+      default: sx = LCD_W - S - v, sy = u; break;
+    }
+    uint32_t cc = c | (uint32_t)c << 16, *p = (uint32_t *)(fb + sy * LCD_W + sx);  // S == 4: two words per row
     for (int k = 0; k < S; k++, p += LCD_W / 2) p[0] = p[1] = cc;
   }
   shown_valid = true;
@@ -264,7 +277,13 @@ void loop() {
   int tx = 0, ty = 0;
   bool down = board_touch(tx, ty);
   PetInput in = {};
-  in.now = now, in.tap = down && !was_down, in.tx = tx / S, in.ty = ty / S;
+  in.now = now, in.tap = down && !was_down;
+  switch (orient) {  // panel touch to canvas pixels
+    case 0: in.tx = tx / S, in.ty = ty / S; break;
+    case 1: in.tx = (LCD_H - 1 - ty) / S, in.ty = tx / S; break;
+    case 2: in.tx = (LCD_W - 1 - tx) / S, in.ty = (LCD_H - 1 - ty) / S; break;
+    default: in.tx = ty / S, in.ty = (LCD_W - 1 - tx) / S; break;
+  }
   was_down = down;
 
   static float gx = 0, gy = 1, ax = 0, ay = 0, az = 1;
@@ -274,7 +293,18 @@ void loop() {
     float jolt = fabsf(sqrtf(ax * ax + ay * ay + az * az) - 1);  // 0 at rest, whatever the orientation
     if (jolt > 0.9f && now > shake_until) in.shake = true, shake_until = now + 1500;
   }
-  in.gx = gx, in.gy = gy;
+  // Turn the canvas when another edge clearly points down for 0.6 s; lying flat keeps the current orientation.
+  static int want = 0;
+  static uint32_t want_since = 0;
+  int next_orient = orient;
+  if (fabsf(gx) > 0.55f || fabsf(gy) > 0.55f) {
+    int cand = fabsf(gx) > fabsf(gy) ? (gx > 0 ? 1 : 3) : (gy > 0 ? 0 : 2);
+    if (cand == orient || fabsf(fabsf(gx) - fabsf(gy)) < 0.25f) want = orient;
+    else if (cand != want) want = cand, want_since = now;
+    else if (now - want_since > 600) next_orient = cand;
+  }
+  in.gx = orient == 0 ? gx : orient == 1 ? -gy : orient == 2 ? -gx : gy;  // gravity in canvas axes
+  in.gy = orient == 0 ? gy : orient == 1 ? gx : orient == 2 ? -gy : -gx;
 
   uint32_t tq = micros();
   static int minute = -1, day = -1;
@@ -310,6 +340,12 @@ void loop() {
   uint32_t t0 = micros();
   PetOutput out;
   xSemaphoreTake(pet_mux, portMAX_DELAY);
+  if (next_orient != orient) {
+    orient = next_orient;
+    pet_set_landscape(orient & 1);
+    shown_valid = false;
+    logf("orientation %d\n", orient);
+  }
   pet_update(in, out);
   if (out.events & EV_FED) logf("food!\n");
   if (out.events & EV_DIED) logf("a fish died\n"), notify("A fish died", "It went 24 hours without food. Tap it on the screen to scoop it out.");

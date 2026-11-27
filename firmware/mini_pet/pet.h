@@ -2,7 +2,7 @@
 #pragma once
 #include <stdint.h>
 
-constexpr int CW = 120, CH = 160;
+constexpr int CW = 120, CH = 160;  // portrait canvas; landscape uses CH x CW, same pixel count
 constexpr int FISH = 8;  // slots: 5 stocked, the rest for offspring
 
 // Approach = one BLE device rising this much above its own slow baseline, ending above APPROACH_MIN.
@@ -56,3 +56,5 @@ void pet_advance(float seconds);  // time that passed while powered off
 void pet_status(PetStatus &s);
 bool pet_feed(uint32_t now);  // remote feeding; false while on cooldown
 void pet_toggle_lamp();
+void pet_set_landscape(bool landscape);  // relayouts the tank; canvas becomes CH wide and CW tall
+void pet_size(int &w, int &h);  // current canvas size

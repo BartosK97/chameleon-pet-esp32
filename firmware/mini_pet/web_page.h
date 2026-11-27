@@ -32,10 +32,12 @@ button:active{transform:scale(.97)}
 </div>
 <script>
 const $ = id => document.getElementById(id);
-const ctx = $('view').getContext('2d'), img = ctx.createImageData(120, 160);
+const view = $('view'), ctx = view.getContext('2d');
+let img = ctx.createImageData(120, 160);  // resized when the device turns to landscape
 async function frame() {
   try {
     const px = new Uint16Array(await (await fetch('/frame')).arrayBuffer());
+    if (px.length !== img.width * img.height) throw 0;
     for (let i = 0; i < px.length; i++) {
       const v = px[i];
       img.data.set([(v >> 11) << 3, ((v >> 5) & 63) << 2, (v & 31) << 3, 255], i * 4);
@@ -47,6 +49,7 @@ async function frame() {
 async function status() {
   try {
     const s = await (await fetch('/status')).json();
+    if (s.w !== view.width) { view.width = s.w; view.height = s.h; img = ctx.createImageData(s.w, s.h); }
     const food = Math.round((1 - s.hunger) * 100);
     $('food').textContent = s.alive ? food + ' %' : '-';
     $('foodbar').style.width = (s.alive ? food : 0) + '%';
