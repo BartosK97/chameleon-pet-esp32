@@ -55,3 +55,4 @@ void pet_load(const PetSave &s);
 void pet_advance(float seconds);  // time that passed while powered off
 void pet_status(PetStatus &s);
 bool pet_feed(uint32_t now);  // remote feeding; false while on cooldown
+void pet_toggle_lamp();

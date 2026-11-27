@@ -5,9 +5,12 @@
 #include <ArduinoOTA.h>
 #include <Preferences.h>
 #include <BLE.h>
+#include <HTTPClient.h>
+#include <WebServer.h>
 #include <WiFi.h>
 #include "board.h"
 #include "pet.h"
+#include "web_page.h"
 #if __has_include("secrets.h")
 #include "secrets.h"  // WIFI_SSID, WIFI_PASS; gitignored, see secrets.example.h
 #endif
@@ -20,7 +23,7 @@ static const char *TIMEZONE = "CET-1CEST,M3.5.0,M10.5.0/3";  // lamp schedule fo
 #define SCREEN_GX(ax, ay, az) (-(ay))
 #define SCREEN_GY(ax, ay, az) (-(ax))
 alignas(4) static uint16_t canvas[CW * CH];
-static uint32_t beep_until = 0, next_sample = 0, next_log = 0, next_save = SAVE_MS, saved_ts = 0;
+static uint32_t beep_until = 0, next_sample = 0, next_log = 0, next_alert = 0, next_save = SAVE_MS, saved_ts = 0;
 static bool was_down = false, net_up = false, clock_synced = false;
 static uint32_t frames = 0, draw_us = 0, wait_us = 0, push_us = 0, pre_us = 0, paint_us = 0;  // per-second frame timing for the log
 static Preferences prefs;
@@ -39,6 +42,10 @@ static void save_state() {
 }
 
 static NetworkServer log_server(23);
+static WebServer web(80);
+static SemaphoreHandle_t pet_mux;  // the web task (core 0) and the frame loop (core 1) share the pet state and canvas
+static uint16_t *snapshot;  // copy of the canvas the web task sends without holding the lock
+static uint32_t last_fps = 0;
 static NetworkClient log_client;
 
 static void logf(const char *fmt, ...) {
@@ -98,6 +105,71 @@ static bool sample_devices(uint32_t now, int &sig, int &base) {
   return approach;
 }
 
+// Push via ntfy.sh over plain HTTP: TLS would need ~40 KB of internal RAM this build cannot spare.
+// Runs in its own short-lived task so the request never stalls a frame.
+static void notify(const char *title, const char *msg) {
+#if defined(WIFI_SSID) && defined(NTFY_TOPIC)
+  if (!net_up) return;
+  struct Note { char title[48], msg[128]; };
+  Note *n = new Note;
+  strlcpy(n->title, title, sizeof n->title);
+  strlcpy(n->msg, msg, sizeof n->msg);
+  xTaskCreatePinnedToCore([](void *p) {
+    Note *n = (Note *)p;
+    HTTPClient http;
+    if (http.begin("http://ntfy.sh/" NTFY_TOPIC)) {
+      http.addHeader("Title", n->title);
+      http.addHeader("Tags", "tropical_fish");
+      Serial.printf("push '%s': %d\n", n->title, http.POST(n->msg));
+      http.end();
+    }
+    delete n;
+    vTaskDelete(nullptr);
+  }, "ntfy", 6144, n, 1, nullptr, 0);
+#endif
+}
+
+static void web_setup() {
+  web.on("/", HTTP_GET, [] { web.send(200, "text/html", WEB_PAGE); });
+  web.on("/status", HTTP_GET, [] {
+    PetStatus st;
+    xSemaphoreTake(pet_mux, portMAX_DELAY);
+    pet_status(st);
+    xSemaphoreGive(pet_mux);
+    char b[200];
+    snprintf(b, sizeof b, "{\"alive\":%d,\"dead\":%d,\"young\":%d,\"hunger\":%.2f,\"hunger_max\":%.2f,\"visitors\":%d,\"lamp\":%s,\"fps\":%u}",
+             st.alive, st.dead, st.young, st.hunger_avg, st.hunger_max, st.visitors_today, st.lamp_on ? "true" : "false", last_fps);
+    web.send(200, "application/json", b);
+  });
+  web.on("/feed", HTTP_POST, [] {
+    xSemaphoreTake(pet_mux, portMAX_DELAY);
+    bool ok = pet_feed(millis());
+    xSemaphoreGive(pet_mux);
+    web.send(200, "application/json", ok ? "{\"ok\":true}" : "{\"ok\":false}");
+  });
+  web.on("/lamp", HTTP_POST, [] {
+    xSemaphoreTake(pet_mux, portMAX_DELAY);
+    pet_toggle_lamp();
+    xSemaphoreGive(pet_mux);
+    web.send(200, "application/json", "{\"ok\":true}");
+  });
+  web.on("/frame", HTTP_GET, [] {  // raw RGB565 canvas, little endian
+    xSemaphoreTake(pet_mux, portMAX_DELAY);
+    memcpy(snapshot, canvas, sizeof canvas);
+    xSemaphoreGive(pet_mux);
+    web.setContentLength(sizeof canvas);
+    web.send(200, "application/octet-stream", "");
+    web.sendContent((const char *)snapshot, sizeof canvas);
+  });
+  web.begin();
+  xTaskCreatePinnedToCore([](void *) {
+    for (;;) {
+      web.handleClient();
+      vTaskDelay(pdMS_TO_TICKS(5));
+    }
+  }, "web", 6144, nullptr, 1, nullptr, 0);
+}
+
 static void net_loop(uint32_t now) {
 #ifdef WIFI_SSID
   if (!net_up && WiFi.status() == WL_CONNECTED) {
@@ -106,6 +178,7 @@ static void net_loop(uint32_t now) {
     ArduinoOTA.setHostname("mini-pet");
     ArduinoOTA.begin();
     log_server.begin();
+    web_setup();
     logf("wifi %s  ota: mini-pet.local  log: nc mini-pet.local 23\n", WiFi.localIP().toString().c_str());
   }
   if (!net_up) return;
@@ -159,6 +232,8 @@ void setup() {
   scan.setFilterDuplicates(false);
   scan.onResult(on_advert);
 
+  pet_mux = xSemaphoreCreateMutex();
+  snapshot = (uint16_t *)heap_caps_malloc(sizeof canvas, MALLOC_CAP_SPIRAM);
   pet_init(millis(), (uint16_t *)heap_caps_malloc(CW * CH * 2, MALLOC_CAP_SPIRAM));
   prefs.begin("mini-pet");
   PetSave s;
@@ -227,16 +302,27 @@ void loop() {
     logf("sig %d base %d | %u fps: clock %u, sim %u, paint %u, vsync wait %u, push %u us | acc %.2f %.2f %.2f | ram %u\n", sig,
          base, frames, pre_us / f, (draw_us - paint_us) / f, paint_us / f, wait_us / f, push_us / f, ax, ay, az,
          (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+    last_fps = frames;
     frames = draw_us = wait_us = push_us = pre_us = paint_us = 0;
     next_log = now + 1000;
   }
 
   uint32_t t0 = micros();
   PetOutput out;
+  xSemaphoreTake(pet_mux, portMAX_DELAY);
   pet_update(in, out);
   if (out.events & EV_FED) logf("food!\n");
-  if (out.events & EV_DIED) logf("a fish died\n");
-  if (out.events & EV_BABY) logf("a baby fish!\n");
+  if (out.events & EV_DIED) logf("a fish died\n"), notify("A fish died", "It went 24 hours without food. Tap it on the screen to scoop it out.");
+  if (out.events & EV_BABY) logf("a baby fish!\n"), notify("A baby fish!", "Three days of good care paid off.");
+  static int alert = 0;  // 0 nothing sent, 1 hungry, 2 starving; re-arms once they are fed again
+  if (clock_synced && now >= next_alert) {
+    next_alert = now + 10000;
+    PetStatus st;
+    pet_status(st);
+    if (st.alive && st.hunger_max > 0.85f && alert < 2) alert = 2, notify("Fish are starving", "Feed them within a few hours or they die.");
+    else if (st.alive && st.hunger_max > 0.6f && alert < 1) alert = 1, notify("Fish are hungry", "Walk past the aquarium with your phone to feed them.");
+    else if (st.hunger_max < 0.4f) alert = 0;
+  }
   if (out.events) next_save = min(next_save, now + 5000);
   static int backlight = -1;
   if (abs(out.backlight - backlight) >= 2) board_backlight(backlight = out.backlight);
@@ -268,6 +354,7 @@ void loop() {
 
   uint32_t tpaint = micros();
   pet_draw(canvas, now);
+  xSemaphoreGive(pet_mux);
   paint_us += micros() - tpaint;
   drawn = true;
   frames++, draw_us += micros() - t0;

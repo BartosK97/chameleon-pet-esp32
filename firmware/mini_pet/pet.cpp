@@ -193,6 +193,7 @@ static bool drop_food(uint32_t now) {
 }
 
 bool pet_feed(uint32_t now) { return drop_food(now); }
+void pet_toggle_lamp() { S.lamp_on = !S.lamp_on; }
 
 static void startle(Fish &f, float fromx, float fromy, uint32_t now) {
   float dx = f.x - fromx, dy = f.y - fromy, d = sqrtf(dx * dx + dy * dy) + 0.01f;
