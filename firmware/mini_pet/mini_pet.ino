@@ -189,12 +189,13 @@ static String tank_context(int fish) {
   PetFish f;
   for (int i = 0; i < FISH; i++)
     if (i != fish && pet_fish(i, f) && f.state == 1) others += String(others.length() ? ", " : "") + names.name[i];
-  int hunger = pet_fish(fish, f) ? (int)(f.hunger * 100) : 0;
+  float h = pet_fish(fish, f) ? f.hunger : 0;  // as words: a bare "Hunger 6 %" read as hungry to the model
+  const char *hunger = h < 0.3f ? "satt" : h < 0.6f ? "etwas hungrig" : h < 0.85f ? "sehr hungrig" : "am Verhungern";
   time_t wall = wall_clock();
   struct tm lt = {};
   if (wall) localtime_r(&wall, &lt);
   char b[200];
-  snprintf(b, sizeof b, "Uhrzeit: %02d:%02d. Dein Hunger: %d %%. Mitbewohner: %s.", lt.tm_hour, lt.tm_min, hunger, others.length() ? others.c_str() : "niemand");
+  snprintf(b, sizeof b, "Uhrzeit: %02d:%02d. Du bist %s. Mitbewohner: %s.", lt.tm_hour, lt.tm_min, hunger, others.length() ? others.c_str() : "niemand");
   return b;
 }
 
@@ -225,7 +226,7 @@ static void run_job(Job *j) {
       bool ok = false;
       if (api_key) {
         xSemaphoreTake(pet_mux, portMAX_DELAY);
-        String sys = fish_system(j->fish, "Ein Mensch schreibt dir über die Webseite des Aquariums. Antworte frech und kurz, höchstens zwei Sätze und 110 Zeichen.");
+        String sys = fish_system(j->fish, "Ein Mensch schreibt dir über die Webseite des Aquariums. Antworte frech und kurz, höchstens zwei Sätze und 100 Zeichen, sonst passt es nicht in deine Sprechblase.");
         String user = String(j->text) + "\n(" + tank_context(j->fish) + ")";
         xSemaphoreGive(pet_mux);
         ok = claude_ask(api_key, sys.c_str(), user, 120, reply);
