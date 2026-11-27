@@ -1,0 +1,11 @@
+// Waveshare ESP32-S3-Touch-LCD-2.8B: ST7701 RGB panel, GT911 touch, TCA9554 expander (LCD/touch reset, buzzer).
+#pragma once
+#include <Arduino.h>
+
+constexpr int LCD_W = 480, LCD_H = 640;
+
+bool board_init();
+uint16_t *board_fb();  // RGB565, LCD_W x LCD_H, scanned out continuously
+bool board_touch(int &x, int &y);
+void board_buzzer(bool on);
+void board_backlight(uint8_t pct);
