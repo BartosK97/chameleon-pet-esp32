@@ -21,7 +21,7 @@ constexpr uint32_t SAVE_MS = 5 * 60 * 1000;
 static const char *TIMEZONE = "CET-1CEST,M3.5.0,M10.5.0/3";  // lamp schedule follows local time (Vienna/Berlin)
 // QMI8658 chip axes to screen axes (+x right, +y down); flip signs/swap here if the water tilts the wrong way.
 #define SCREEN_GX(ax, ay, az) (-(ay))
-#define SCREEN_GY(ax, ay, az) (-(ax))
+#define SCREEN_GY(ax, ay, az) (ax)
 alignas(4) static uint16_t canvas[CW * CH];
 static uint32_t beep_until = 0, next_sample = 0, next_log = 0, next_alert = 0, next_save = SAVE_MS, saved_ts = 0;
 static bool was_down = false, net_up = false, clock_synced = false;
