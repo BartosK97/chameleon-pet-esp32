@@ -4,7 +4,7 @@
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![ESP32-S3](https://img.shields.io/badge/ESP32--S3-Arduino%20core%204.0-e7352c)
 
-A pixel-art aquarium on a 2.8" touch display. To feed the fish, you walk up to it with your phone. If nobody comes by for 24 hours, the fish die.
+A pixel-art aquarium on a 2.8" touch display. To feed the fish, you walk up to it with your phone. If nobody comes by for 24 hours, the fish die. And the fish talk back, powered by Claude.
 
 <p align="center"><img src="docs/aquarium.png" width="240" alt="Aquarium animation: fish swim, a phone comes close, food rains down, fish eat"></p>
 
@@ -21,8 +21,10 @@ A pixel-art aquarium on a 2.8" touch display. To feed the fish, you walk up to i
 - **Day and night.** A tank lamp switches on at 07:00 and off at 22:00 local time; tap the lamp to switch it yourself. At night the tank and backlight dim and the fish sleep near the bottom.
 - **Offspring.** A fish that stays well fed for three days gets a baby, which grows to full size over two days.
 - **A snail** cleans up flakes that sink to the sand.
+- **Talking fish.** Every fish gets a name and a personality from Claude Haiku 5.5, and comments on what happens in speech bubbles: being fed, shaken, turned, tapped, the lights going out, a death or a baby, or nothing at all for a while. They chirp on the buzzer while they talk, except at night. Without an API key or internet they fall back to built-in lines.
+- **Evening diary.** At 21:00 the fish write a short diary entry of the day and send it as a push notification.
 - **Visitor counter.** How many people walked up today.
-- **Web page** at `http://mini-pet.local/`: live view, feed and lamp buttons, food level, fish count and visitors.
+- **Web page** at `http://mini-pet.local/`: live view, feed and lamp buttons, food level, visitors, every fish with name, character and hunger, and a chat box to talk to them (the answer also appears on the device).
 - **Push notifications** via [ntfy](https://ntfy.sh) when the fish get hungry, are starving, die, or have a baby.
 - **Live signal graph.** Shows what the Bluetooth sensing sees. Tap the signal icon to hide or show it.
 - **Wireless.** Over-the-air updates and a network log, so once it's flashed it only needs power.
@@ -58,6 +60,7 @@ No wiring and no soldering needed.
 brew install arduino-cli   # or see arduino.github.io/arduino-cli
 arduino-cli config add board_manager.additional_urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
 arduino-cli core update-index && arduino-cli core install esp32:esp32@4.0.0
+arduino-cli lib install ArduinoJson
 ```
 
 ```bash
@@ -82,9 +85,13 @@ Without `secrets.h` the firmware runs offline. State is still saved, but without
 
 1. Pick a long random topic name and put it in `secrets.h` as `NTFY_TOPIC`. Anyone who knows the name can read and send to it.
 2. Install the ntfy app and subscribe to that topic.
-3. The aquarium posts when the fish get hungry (60 %), when they are starving (85 %), when one dies, and when a baby arrives.
+3. The aquarium posts when the fish get hungry (60 %), when they are starving (85 %), when one dies, when a baby arrives, and its evening diary.
 
-Notifications go over plain HTTP. With WiFi and BLE running, this build has no room for the ~40 KB of internal RAM that TLS needs, so the topic name and message travel unencrypted.
+### Talking fish
+
+Put an Anthropic API key in `secrets.h` as `ANTHROPIC_KEY`. The fish use Claude Haiku 5.5, the cheapest current model, with thinking off and short answers. A line costs roughly 300 input and 40 output tokens, about $0.00005 at $0.10 / $0.50 per million tokens. Lines come at most every 6 s and idle chatter every 4–8 min, so even a busy day of a few hundred lines costs around a cent. Speech, names, the diary and chat answers are in German.
+
+All HTTPS (Claude and ntfy) runs in one task on core 0. TLS needs about 45 KB of internal RAM, which this build only has with Bluetooth off, so that task switches BLE off for the few seconds a call takes and back on afterwards. Certificates are checked against the built-in Mozilla bundle.
 
 ## Preview without hardware
 
@@ -122,6 +129,7 @@ The RGB panel reads its frame buffer out of PSRAM continuously. With WiFi and BL
 - **Paced by vsync.** The frame is pushed right after vsync and the next one is drawn while the panel scans out, giving 43 fps (the panel's refresh rate).
 - **Web server on core 0** with a mutex around the game state, so serving the 38 KB live frame never stalls the animation.
 - **QMI8658:** the accelerometer only produces data with Waveshare's CTRL7 = 0x43. A read of 0x8000 on every axis means no sample yet.
+- **TLS next to BLE.** With BLE running only ~22 KB of internal RAM is free in one block, and a TLS handshake fails. `BLE.end()` frees about 90 KB, so HTTPS calls run in short BLE pauses.
 - **Rotation is free.** Landscape is a 160×120 canvas, the same pixel count, so it reuses every buffer. The push maps each 4×4 block to the rotated position on the portrait panel.
 
 ## Layout
@@ -132,18 +140,21 @@ The RGB panel reads its frame buffer out of PSRAM continuously. With WiFi and BL
 | `firmware/mini_pet/pet.*` | Aquarium simulation and pixel-art renderer |
 | `firmware/mini_pet/mini_pet.ino` | BLE approach detection, IMU, WiFi/OTA/NTP, web server, push, persistence, frame loop |
 | `firmware/mini_pet/web_page.h` | The page served at `mini-pet.local`; it follows the device into landscape |
+| `firmware/mini_pet/ai.*` | HTTPS calls to the Claude Messages API and ntfy |
+| `firmware/mini_pet/talk.h` | Types for the fish-talk job queue |
+| `firmware/mini_pet/font_tomthumb.h` | 3×5 pixel font with Latin-1 for the speech bubbles |
 | `tools/preview.cpp`, `tools/apng.py` | Desktop renderer for previews and the README animation |
 
 ## Ideas
 
-- Sound effects and a little tune when a baby arrives
+- A little tune when a baby arrives
 - More species, plants that grow, a treasure chest that opens when fed often
 - Battery mode with deep sleep at night, woken by touch
 - Use the spare ESP32-S3 devkit to drive a 64×64 HUB75 LED panel version
 
 ## Credits
 
-The ST7701 init sequence, panel timings and pin map come from Waveshare's ESP32-S3-Touch-LCD-2.8B demo. Everything else is original.
+The ST7701 init sequence, panel timings and pin map come from Waveshare's ESP32-S3-Touch-LCD-2.8B demo. The speech-bubble font is Tom Thumb (Brian J. Swetland, Vassilii Khachaturov, Robey Pointer; Adafruit GFX conversion), BSD-3-Clause, license in `font_tomthumb.h`. Everything else is original.
 
 ## License
 
