@@ -11,10 +11,8 @@ static uint16_t hsv(float h, float s, float v) {
   return rgb((r + m) * 255, (g + m) * 255, (b + m) * 255);
 }
 
-// Measured 2026-11-27: room background -58..-62 dBm, phone touching the device -35..-43.
-static const int NEAR_IN = -45, NEAR_OUT = -52;
-static const uint32_t NEAR_DWELL = 400;  // ms above NEAR_IN before it counts; filters single spikes
-static const uint32_t FEED_COOLDOWN = 15000, FLY_MS = 1600, TONGUE_OUT = 180, TONGUE_BACK = 220;
+// Measured 2026-11-27: room -56..-64 dBm, iPhone at 30 cm -44..-51, right next to it -39..-49.
+static const uint32_t FEED_COOLDOWN = 8000, FLY_MS = 1600, TONGUE_OUT = 180, TONGUE_BACK = 220;
 static const float HUNGER_PER_MS = 1.0f / (10 * 60 * 1000);  // test pace: starving after 10 min
 static const float JOY_PER_MS = 1.0f / (5 * 60 * 1000);
 
@@ -25,9 +23,11 @@ static const float MOUTH_X = 45, MOUTH_Y = 47, EYE_X = 38, EYE_Y = 44;
 
 static struct {
   float hunger = 0.6f, joy = 0.4f;
-  bool near = false;
-  int rssi = -100;
-  uint32_t last_ms = 0, last_feed = 0, above_since = 0;
+  int sig = -100;
+  bool debug = true;
+  struct { int8_t sig, base; bool hit; } hist[56] = {};
+  int hist_i = 0;
+  uint32_t last_ms = 0, last_feed = 0, last_approach = 0;
   bool fly = false, tongue = false;
   uint32_t fly_t0 = 0, tongue_t0 = 0;
   float fx = 0, fy = 0, tip_x = MOUTH_X, tip_y = MOUTH_Y;
@@ -43,7 +43,8 @@ static float rnd() { seed = seed * 1664525u + 1013904223u; return (seed >> 8) / 
 
 void pet_init(uint32_t now) {
   S.last_ms = now;
-  S.last_feed = now - FEED_COOLDOWN;
+  S.last_feed = S.last_approach = now - FEED_COOLDOWN;
+  for (auto &h : S.hist) h = {-100, -100, false};
 }
 
 void pet_update(const PetInput &in, PetOutput &out) {
@@ -54,12 +55,16 @@ void pet_update(const PetInput &in, PetOutput &out) {
   S.hunger = fminf(1, S.hunger + dt * HUNGER_PER_MS);
   S.joy = fmaxf(0, S.joy - dt * JOY_PER_MS);
 
-  S.rssi = in.rssi;
-  if (in.rssi < NEAR_IN) S.above_since = now;
-  if (!S.near && now - S.above_since >= NEAR_DWELL) S.near = true;
-  else if (S.near && in.rssi < NEAR_OUT) S.near = false;
+  S.sig = in.sig;
+  if (in.approach) S.last_approach = now;
+  if (in.sample) {
+    S.hist[S.hist_i] = {(int8_t)in.sig, (int8_t)in.base, in.approach};
+    S.hist_i = (S.hist_i + 1) % 56;
+  } else if (in.approach) {
+    S.hist[(S.hist_i + 55) % 56].hit = true;
+  }
 
-  if (S.near && !S.fly && now - S.last_feed > FEED_COOLDOWN) {
+  if (in.approach && !S.fly && now - S.last_feed > FEED_COOLDOWN) {
     S.fly = true;
     S.fly_t0 = S.last_feed = now;
     out.beep_ms = 15;
@@ -94,7 +99,9 @@ void pet_update(const PetInput &in, PetOutput &out) {
     }
   }
 
-  if (in.tap) {
+  if (in.tap && in.tx >= 46 && in.ty <= 11) {  // signal icon toggles the graph
+    S.debug = !S.debug;
+  } else if (in.tap) {
     if (in.tx >= 8 && in.tx <= 48 && in.ty >= 34 && in.ty <= 66) {
       S.joy = fminf(1, S.joy + 0.15f);
       S.flash = 1;
@@ -234,15 +241,43 @@ static void draw_hud(uint32_t now) {
       px(3 + x, 3 + y, x < food ? rgb(120, 200, 60) : BAR_BG);
       px(3 + x, 7 + y, x < joy ? HEART : BAR_BG);
     }
-  int bars = S.rssi >= NEAR_IN ? 4 : S.rssi >= -55 ? 3 : S.rssi >= -65 ? 2 : S.rssi >= -80 ? 1 : 0;
+  int bars = S.sig >= APPROACH_MIN + 7 ? 4 : S.sig >= APPROACH_MIN ? 3 : S.sig >= -65 ? 2 : S.sig >= -80 ? 1 : 0;
+  bool hot = now - S.last_approach < 1500;
   for (int i = 0; i < 4; i++)
     for (int h = 0; h <= i; h++)
-      px(49 + i * 2, 8 - h, i < bars ? (S.near ? HEART : rgb(70, 80, 70)) : rgb(190, 205, 190));
+      px(49 + i * 2, 8 - h, i < bars ? (hot ? HEART : rgb(70, 80, 70)) : rgb(190, 205, 190));
+}
+
+// Signal graph, oldest left: blue = strongest device, grey = its baseline, red dots = APPROACH_MIN, pink column = approach.
+static void draw_graph() {
+  const int X0 = 2, Y0 = 12, GH = 22, TOP = -30, RANGE = 55;
+  auto y_of = [&](int dbm) { int y = Y0 + (TOP - dbm) * (GH - 1) / RANGE; return y < Y0 ? Y0 : y > Y0 + GH - 1 ? Y0 + GH - 1 : y; };
+  for (int y = Y0 - 1; y <= Y0 + GH; y++)
+    for (int x = X0 - 1; x <= X0 + 56; x++)
+      px(x, y, (y == Y0 - 1 || y == Y0 + GH || x == X0 - 1 || x == X0 + 56) ? rgb(150, 170, 150) : rgb(250, 252, 246));
+  int prev = -1;
+  for (int i = 0; i < 56; i++) {
+    const auto &h = S.hist[(S.hist_i + i) % 56];
+    int x = X0 + i;
+    if (h.hit)
+      for (int y = Y0; y < Y0 + GH; y++) px(x, y, rgb(255, 190, 205));
+    if (i % 2 == 0) px(x, y_of(APPROACH_MIN), HEART);
+    if (h.base > -100) px(x, y_of(h.base), rgb(160, 160, 160));
+    if (h.sig > -100) {
+      int y = y_of(h.sig);
+      if (prev >= 0) line(x - 1, prev, x, y, rgb(40, 90, 200));
+      else px(x, y, rgb(40, 90, 200));
+      prev = y;
+    } else {
+      prev = -1;
+    }
+  }
 }
 
 void pet_draw(uint16_t *canvas, uint32_t now) {
   C = canvas;
   draw_background();
+  if (S.debug) draw_graph();
   draw_chameleon(now);
   if (S.fly) {
     int x = (int)S.fx, y = (int)S.fy;

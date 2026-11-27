@@ -4,11 +4,16 @@
 
 constexpr int CW = 60, CH = 80;
 
+// Approach = one BLE device rising this much above its own slow baseline, ending above APPROACH_MIN.
+constexpr int APPROACH_MIN = -52, APPROACH_RISE = 8;
+
 struct PetInput {
-  uint32_t now;  // ms
-  bool tap;      // finger went down this frame
-  int tx, ty;    // tap in canvas pixels
-  int rssi;      // smoothed strongest BLE signal nearby, dBm (-100 = nothing)
+  uint32_t now;   // ms
+  bool tap;       // finger went down this frame
+  int tx, ty;     // tap in canvas pixels
+  bool sample;    // new signal sample this frame (every 250 ms)
+  int sig, base;  // strongest device now and its slow baseline, dBm (-100 = nothing)
+  bool approach;  // some device just came close
 };
 
 struct PetOutput {

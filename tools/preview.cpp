@@ -6,14 +6,15 @@
 int main() {
   const int scale = 4;
   // frame times with what happens just before them: idle, petted, phone near (fly), tongue, eaten
-  const uint32_t shots[] = {800, 1400, 3200, 4140, 4700};
+  const uint32_t shots[] = {800, 1400, 3000, 3700, 4300};
   const int n = sizeof(shots) / sizeof(shots[0]), W = CW * scale + 4, H = CH * scale;
   std::vector<uint16_t> canvas(CW * CH);
   std::vector<uint8_t> img(W * n * H * 3, 255);
   pet_init(0);
   int shot = 0;
   for (uint32_t t = 0; t <= shots[n - 1]; t += 20) {
-    PetInput in = {t, t == 1100, 28, 46, t >= 2000 ? -45 : -80};
+    int sig = t < 1900 ? -66 : -44;  // phone brought close at 1.9 s
+    PetInput in = {t, t == 1100, 28, 46, t % 240 == 0, sig, t < 2000 ? -66 : -60, t == 2000};
     PetOutput out;
     pet_update(in, out);
     if (t < shots[shot]) continue;
