@@ -19,6 +19,12 @@ button:active{transform:scale(.97)}
 .bar{height:8px;background:#0b2540;border-radius:4px;overflow:hidden;margin-top:6px}
 .bar i{display:block;height:100%;background:#fa0;transition:width .5s}
 #msg{min-height:1.2em;font-size:14px;opacity:.85}
+h2{font-size:15px;margin:18px 0 8px}
+.fish{display:flex;justify-content:space-between;background:#123a5c;border-radius:10px;padding:8px 12px;margin:6px 0;font-size:14px}
+.fish small{opacity:.7}
+#log{max-height:220px;overflow-y:auto;font-size:14px}
+#log p{margin:6px 0}#log .me{text-align:right;opacity:.8}
+form{display:flex;gap:8px}input{flex:1;padding:12px;border-radius:12px;border:0;font-size:16px;background:#123a5c;color:#fff}
 </style></head><body>
 <h1>Pocket Aquarium</h1>
 <canvas id="view" width="120" height="160"></canvas>
@@ -30,6 +36,10 @@ button:active{transform:scale(.97)}
   <div class="card">Visitors today<b id="vis">-</b></div>
   <div class="card">Lamp<b id="lmp">-</b></div>
 </div>
+<h2>Fish</h2><div id="fishlist"></div>
+<h2>Talk to the fish</h2>
+<div id="log"></div>
+<form id="chat"><input id="q" maxlength="200" placeholder="Say something..." autocomplete="off"><button>Send</button></form>
 <script>
 const $ = id => document.getElementById(id);
 const view = $('view'), ctx = view.getContext('2d');
@@ -64,6 +74,27 @@ $('feed').onclick = async () => {
   $('msg').textContent = r.ok ? 'Food is on its way.' : 'They were just fed. Try again in a few seconds.';
 };
 $('lamp').onclick = async () => { await fetch('/lamp', {method: 'POST'}); status(); };
+async function fish() {
+  try {
+    const list = await (await fetch('/fish')).json();
+    $('fishlist').innerHTML = list.map(f => `<div class="fish"><span><b>${esc(f.name)}</b> <small>${esc(f.kind)}${f.baby ? ', baby' : ''} · ${esc(f.trait)}</small></span><span>${f.dead ? 'dead' : 'hunger ' + f.hunger + ' %'}</span></div>`).join('');
+  } catch (e) {}
+  setTimeout(fish, 5000);
+}
+const esc = s => String(s).replace(/[&<>"]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[c]));
+function line(cls, html) { const p = document.createElement('p'); p.className = cls; p.innerHTML = html; $('log').append(p); $('log').scrollTop = 1e9; }
+$('chat').onsubmit = async e => {
+  e.preventDefault();
+  const q = $('q').value.trim();
+  if (!q) return;
+  $('q').value = '';
+  line('me', esc(q));
+  try {
+    const r = await (await fetch('/chat', {method: 'POST', body: q})).json();
+    line('', (r.name ? '<b>' + esc(r.name) + ':</b> ' : '') + esc(r.reply));
+  } catch (e) { line('', 'No answer.'); }
+};
 frame();
 status();
+fish();
 </script></body></html>)HTML";
