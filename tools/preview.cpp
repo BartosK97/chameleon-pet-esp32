@@ -47,6 +47,9 @@ int main(int argc, char **argv) {
       pet_load(s);
     }
     if (!anim && t == 13040) pet_set_landscape(true);
+    if (t == 2600) pet_say(0, "Flossi: Endlich Futter! Ich dachte schon, ihr habt mich vergessen. \xc3\xa4\xc3\xb6\xc3\xbc\xc3\x9f", t);
+    if (t == 9000) pet_say(1, "Grummel: Licht aus, endlich Ruhe.", t);
+    if (t == 15000) pet_say(2, "Sunny: Quer ist das neue Hoch!", t);
     PetOutput out;
     pet_update(in, out);
     if (anim) {

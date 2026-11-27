@@ -2,6 +2,7 @@
 #include <math.h>
 #include <string.h>
 #include <initializer_list>
+#include "font_tomthumb.h"
 
 static constexpr uint16_t rgb(int r, int g, int b) { return ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3); }
 
@@ -62,6 +63,7 @@ static struct {
   bool debug = true;
   struct { int8_t sig, base; bool hit; } hist[HIST] = {};
   int hist_i = 0;
+  struct { int fish = -1; char text[112] = {}; uint32_t until = 0; } bubble;  // text in Latin-1 for the font
 } S;
 
 static uint32_t seed = 12345;
@@ -209,6 +211,31 @@ void pet_set_landscape(bool landscape) {
 }
 
 void pet_size(int &w, int &h) { w = W, h = H; }
+
+bool pet_fish(int slot, PetFish &f) {
+  if (slot < 0 || slot >= FISH || S.fish[slot].state == GONE) return false;
+  const Fish &x = S.fish[slot];
+  f = {x.kind, x.state, x.hunger, x.size};
+  return true;
+}
+
+// UTF-8 in, Latin-1 out (the font covers 0x20-0xFF); anything else, emoji included, is dropped.
+void pet_say(int slot, const char *s, uint32_t now) {
+  int n = 0;
+  for (const uint8_t *p = (const uint8_t *)s; *p && n < (int)sizeof S.bubble.text - 1; p++) {
+    uint32_t c = *p;
+    if (c >= 0xC2 && c <= 0xC3 && (p[1] & 0xC0) == 0x80) c = ((c & 0x1F) << 6) | (*++p & 0x3F);
+    else if (c >= 0x80) {
+      while ((p[1] & 0xC0) == 0x80) p++;
+      continue;
+    }
+    if (c == '\n' || c == '\r') c = ' ';
+    if (c >= 0x20 && c != 0x7F && (c < 0x80 || c >= 0xA0)) S.bubble.text[n++] = (char)c;
+  }
+  S.bubble.text[n] = 0;
+  S.bubble.fish = slot;
+  S.bubble.until = now + 3500 + 80 * n;
+}
 void pet_toggle_lamp() { S.lamp_on = !S.lamp_on; }
 
 static void startle(Fish &f, float fromx, float fromy, uint32_t now) {
@@ -218,13 +245,17 @@ static void startle(Fish &f, float fromx, float fromy, uint32_t now) {
   f.retarget = now + 1500;
 }
 
+static bool lamp_changed;
+
 static void update_light(const PetInput &in, float dt) {
+  bool was_on = S.lamp_on;
   if (in.minute >= 0) {  // switch on the scheduled edges only, so a manual toggle holds until the next one
     if (S.last_minute >= 0 && S.last_minute < LAMP_ON_MIN && in.minute >= LAMP_ON_MIN) S.lamp_on = true;
     if (S.last_minute >= 0 && S.last_minute < LAMP_OFF_MIN && in.minute >= LAMP_OFF_MIN) S.lamp_on = false;
     if (S.last_minute < 0) S.lamp_on = in.minute >= LAMP_ON_MIN && in.minute < LAMP_OFF_MIN;
     S.last_minute = in.minute;
   }
+  if (S.lamp_on != was_on) lamp_changed = true;
   float target = S.lamp_on ? 1 : NIGHT;
   S.light += (target - S.light) * fminf(1, dt * 0.8f);
 }
@@ -233,7 +264,7 @@ void pet_update(const PetInput &in, PetOutput &out) {
   uint32_t now = in.now;
   float dt = fminf(0.2f, (now - S.last_ms) / 1000.0f), t = now / 1000.0f;
   S.last_ms = now;
-  out = {0, 0, 0};
+  out = {0, 0, 0, -1};
 
   S.sig = in.sig;
   if (in.sample) {
@@ -249,7 +280,9 @@ void pet_update(const PetInput &in, PetOutput &out) {
     if (drop_food(now)) out.beep_ms = 15, out.events |= EV_FED;
   }
 
+  lamp_changed = false;
   update_light(in, dt);
+  if (lamp_changed) out.events |= EV_LAMP;
   out.backlight = (int)(40 + 60 * (S.light - NIGHT) / (1 - NIGHT));
   bool sleepy = S.light < 0.6f;
 
@@ -263,7 +296,7 @@ void pet_update(const PetInput &in, PetOutput &out) {
     S.debug = !S.debug;
   } else if (in.tap && in.tx >= W - 66 && in.tx < W - 24 && in.ty <= 12) {  // the lamp
     S.lamp_on = !S.lamp_on;
-    out.beep_ms = 8;
+    out.beep_ms = 8, out.events |= EV_LAMP;
   } else if (in.tap) {
     bool any = false, scooped = false;
     for (auto &f : S.fish) any |= f.state != GONE;
@@ -274,6 +307,11 @@ void pet_update(const PetInput &in, PetOutput &out) {
     }
     for (auto &f : S.fish)  // tapping a dead fish scoops it out
       if (!scooped && f.state == DEAD && fabsf(f.x - in.tx) < 12 && fabsf(f.y - in.ty) < 10) f.state = GONE, scooped = true;
+    for (int i = 0; i < FISH && !scooped; i++) {  // tapping a live fish makes it talk
+      const Fish &f = S.fish[i];
+      if (f.state == ALIVE && fabsf(f.x - in.tx) < SPECIES[f.kind].rx * f.size + 4 && fabsf(f.y - in.ty) < SPECIES[f.kind].ry * f.size + 4)
+        out.tapped_fish = i, scooped = true;
+    }
     if (!scooped) {
       S.ripple_x = in.tx, S.ripple_y = in.ty, S.ripple_t0 = now;
       for (auto &f : S.fish)  // tap on the glass: nearby fish dart away
@@ -584,6 +622,56 @@ static void draw_graph() {
   }
 }
 
+static int draw_glyph(int x, int baseline, uint8_t c, uint16_t col) {
+  if (c < TomThumb.first || c > TomThumb.last) c = '?';
+  const GFXglyph &g = TomThumb.glyph[c - TomThumb.first];
+  const uint8_t *bm = TomThumb.bitmap + g.bitmapOffset;
+  for (int i = 0, n = g.width * g.height; i < n; i++)
+    if (bm[i >> 3] & (0x80 >> (i & 7))) px(x + g.xOffset + i % g.width, baseline + g.yOffset + i / g.width, col);
+  return g.xAdvance;
+}
+
+// Word-wrapped bubble above (or, near the top, below) the speaking fish, with a little tail.
+static void draw_bubble(uint32_t now) {
+  if (S.bubble.fish < 0 || now >= S.bubble.until || S.fish[S.bubble.fish].state == GONE) return;
+  const Fish &f = S.fish[S.bubble.fish];
+  const int cols = (W - 10) / 4, max_lines = 4;
+  const char *lines[max_lines];
+  int lens[max_lines], n = 0, widest = 0;
+  for (const char *p = S.bubble.text; *p && n < max_lines;) {
+    while (*p == ' ') p++;
+    int len = (int)strlen(p) < cols ? (int)strlen(p) : cols;
+    if (p[len] && p[len] != ' ')
+      for (int k = len; k > cols / 2; k--)
+        if (p[k] == ' ') { len = k; break; }
+    lines[n] = p, lens[n] = len, n++;
+    widest = len > widest ? len : widest;
+    p += len;
+  }
+  if (!n) return;
+  int bw = widest * 4 + 5, bh = n * 6 + 3, fr = (int)(SPECIES[f.kind].ry * f.size);
+  int bx = (int)f.x - bw / 2, by = (int)f.y - fr - bh - 5;
+  bx = bx < 2 ? 2 : bx > W - bw - 2 ? W - bw - 2 : bx;
+  bool below = by < 13;
+  if (below) by = (int)f.y + fr + 5;
+  const uint16_t fill = rgb(255, 255, 248), ink = OUTLINE;
+  for (int y = by; y < by + bh; y++)
+    for (int x = bx; x < bx + bw; x++) {
+      bool edge = y == by || y == by + bh - 1 || x == bx || x == bx + bw - 1;
+      bool corner = (y == by || y == by + bh - 1) && (x == bx || x == bx + bw - 1);
+      if (!corner) px(x, y, edge ? ink : fill);
+    }
+  int tx = (int)f.x < bx + 3 ? bx + 3 : (int)f.x > bx + bw - 4 ? bx + bw - 4 : (int)f.x;
+  for (int k = 1; k <= 3; k++) {  // tail towards the fish
+    int ty = below ? by - k : by + bh - 1 + k;
+    px(tx - 1, ty, ink), px(tx, ty, k < 3 ? fill : ink), px(tx + 1, ty, k < 2 ? fill : ink);
+  }
+  for (int i = 0; i < n; i++) {
+    int x = bx + 3;
+    for (int k = 0; k < lens[i]; k++) x += draw_glyph(x, by + 7 + i * 6, (uint8_t)lines[i][k], ink);
+  }
+}
+
 void pet_draw(uint16_t *canvas, uint32_t now) {
   C = canvas;
   float t = now / 1000.0f;
@@ -617,4 +705,5 @@ void pet_draw(uint16_t *canvas, uint32_t now) {
   if (S.debug) draw_graph();
   draw_lamp();
   draw_hud(now);
+  draw_bubble(now);
 }

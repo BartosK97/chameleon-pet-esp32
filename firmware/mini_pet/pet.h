@@ -21,12 +21,13 @@ struct PetInput {
   int day;        // local day number, -1 = clock unknown
 };
 
-enum { EV_FED = 1, EV_DIED = 2, EV_BABY = 4 };
+enum { EV_FED = 1, EV_DIED = 2, EV_BABY = 4, EV_LAMP = 8 };
 
 struct PetOutput {
   int beep_ms;    // >0: start a beep this long
   int events;     // EV_* bits that happened this frame
-  int backlight;  // wanted backlight, percent
+  int backlight;    // wanted backlight, percent
+  int tapped_fish;  // fish slot tapped this frame, -1 = none
 };
 
 struct PetStatus {
@@ -56,5 +57,8 @@ void pet_advance(float seconds);  // time that passed while powered off
 void pet_status(PetStatus &s);
 bool pet_feed(uint32_t now);  // remote feeding; false while on cooldown
 void pet_toggle_lamp();
+struct PetFish { int kind, state; float hunger, size; };  // kind: 0 clownfish, 1 tang, 2 yellow, 3 neon; state 1 alive, 2 dead
+bool pet_fish(int slot, PetFish &f);  // false for an empty slot
+void pet_say(int slot, const char *utf8, uint32_t now);  // speech bubble over that fish for a few seconds
 void pet_set_landscape(bool landscape);  // relayouts the tank; canvas becomes CH wide and CW tall
 void pet_size(int &w, int &h);  // current canvas size
