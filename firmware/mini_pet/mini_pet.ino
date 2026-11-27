@@ -1,6 +1,9 @@
-// Chameleon pet: touch pets it, a phone brought close feeds it (per-device BLE RSSI rise). WiFi gives OTA + a TCP log.
+// Aquarium: a phone brought close drops food (per-device BLE RSSI rise), unfed fish die after 24 h.
+// WiFi gives OTA, a TCP log and NTP time so hunger keeps counting while powered off.
 #include <stdarg.h>
+#include <time.h>
 #include <ArduinoOTA.h>
+#include <Preferences.h>
 #include <BLE.h>
 #include <WiFi.h>
 #include "board.h"
@@ -9,10 +12,25 @@
 #include "secrets.h"  // WIFI_SSID, WIFI_PASS; gitignored, see secrets.example.h
 #endif
 
-constexpr int S = LCD_W / CW;  // canvas scale, 8x
+constexpr int S = LCD_W / CW;  // canvas scale, 4x
+constexpr uint32_t FRAME_MS = 1000 / 24, SAVE_MS = 5 * 60 * 1000;
 static uint16_t canvas[CW * CH];
-static uint32_t beep_until = 0, next_sample = 0, next_log = 0;
-static bool was_down = false, net_up = false;
+static uint32_t beep_until = 0, next_sample = 0, next_log = 0, next_frame = 0, next_save = SAVE_MS, saved_ts = 0;
+static bool was_down = false, net_up = false, clock_synced = false;
+static Preferences prefs;
+
+static uint32_t wall_clock() {
+  time_t t = time(nullptr);
+  return t > 1700000000 ? (uint32_t)t : 0;
+}
+
+// Flash writes stall the panel for a moment, so only every few minutes or right after something changed.
+static void save_state() {
+  PetSave s;
+  pet_get_save(s);
+  prefs.putBytes("pet", &s, sizeof s);
+  prefs.putULong("ts", wall_clock());
+}
 
 static NetworkServer log_server(23);
 static NetworkClient log_client;
@@ -78,6 +96,7 @@ static void net_loop(uint32_t now) {
 #ifdef WIFI_SSID
   if (!net_up && WiFi.status() == WL_CONNECTED) {
     net_up = true;
+    configTime(0, 0, "pool.ntp.org", "time.google.com");
     ArduinoOTA.setHostname("mini-pet");
     ArduinoOTA.begin();
     log_server.begin();
@@ -115,6 +134,7 @@ void setup() {
   if (!board_init()) logf("display init failed\n");
 
 #ifdef WIFI_SSID
+  WiFi.persistent(false);  // no NVS writes from the WiFi stack
   WiFi.mode(WIFI_STA);
   WiFi.setHostname("mini-pet");
   WiFi.begin(WIFI_SSID, WIFI_PASS);
@@ -129,6 +149,10 @@ void setup() {
   scan.onResult(on_advert);
 
   pet_init(millis());
+  prefs.begin("mini-pet");
+  PetSave s;
+  if (prefs.getBytes("pet", &s, sizeof s) == sizeof s) pet_load(s);
+  saved_ts = prefs.getULong("ts", 0);
   logf("mini-pet ready\n");
 }
 
@@ -161,7 +185,25 @@ void loop() {
 
   PetOutput out;
   pet_update(in, out);
-  if (out.beep_ms == 15) logf("fly!\n");
+  if (out.fed) logf("food!\n");
+  if (out.fed || out.beep_ms == 300) next_save = min(next_save, now + 5000);
+
+  if (!clock_synced && wall_clock()) {  // catch up on the time spent powered off
+    clock_synced = true;
+    uint32_t wall = wall_clock();
+    if (saved_ts && wall > saved_ts) pet_advance(wall - saved_ts);
+    logf("clock synced, %lu s since last save\n", saved_ts ? (unsigned long)(wall - saved_ts) : 0UL);
+    save_state();
+  }
+#ifdef WIFI_SSID
+  bool can_save = clock_synced;
+#else
+  bool can_save = true;
+#endif
+  if (can_save && now >= next_save) {
+    save_state();
+    next_save = now + SAVE_MS;
+  }
   if (out.beep_ms) {
     board_buzzer(true);
     beep_until = now + out.beep_ms;
@@ -172,6 +214,10 @@ void loop() {
   }
 
   pet_draw(canvas, now);
+  board_wait_vsync();
   present();
-  delay(30);
+  next_frame += FRAME_MS;
+  int32_t wait = (int32_t)(next_frame - millis());
+  if (wait > 0) delay(wait);
+  else next_frame = millis();
 }
