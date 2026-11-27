@@ -14,6 +14,13 @@ static uint8_t exp_out = 0x7F;  // power-on default 0xFF would leave buzzer on
 static spi_device_handle_t spi;
 static esp_lcd_panel_handle_t panel;
 static uint16_t *fb;
+static SemaphoreHandle_t vsync_sem;
+
+static bool IRAM_ATTR on_vsync(esp_lcd_panel_handle_t, const esp_lcd_rgb_panel_event_data_t *, void *) {
+  BaseType_t woken = pdFALSE;
+  xSemaphoreGiveFromISR(vsync_sem, &woken);
+  return woken == pdTRUE;
+}
 
 static void exp_write(uint8_t reg, uint8_t v) {
   Wire.beginTransmission(EXP_ADDR);
@@ -111,7 +118,7 @@ static bool rgb_init() {
   static const int data[16] = {5, 45, 48, 47, 21, 14, 13, 12, 11, 10, 9, 46, 3, 8, 18, 17};
   esp_lcd_rgb_panel_config_t cfg = {};
   cfg.clk_src = LCD_CLK_SRC_PLL240M;
-  cfg.timings.pclk_hz = 30 * 1000 * 1000;
+  cfg.timings.pclk_hz = 18 * 1000 * 1000;  // ~42 Hz refresh; Waveshare's 30 MHz eats the PSRAM bandwidth WiFi+BLE need
   cfg.timings.h_res = LCD_W;
   cfg.timings.v_res = LCD_H;
   cfg.timings.hsync_pulse_width = 10;
@@ -134,6 +141,10 @@ static bool rgb_init() {
   for (int i = 0; i < 16; i++) cfg.data_gpio_nums[i] = (gpio_num_t)data[i];
   cfg.flags.fb_in_psram = 1;
   if (esp_lcd_new_rgb_panel(&cfg, &panel) != ESP_OK) return false;
+  vsync_sem = xSemaphoreCreateBinary();
+  esp_lcd_rgb_panel_event_callbacks_t cbs = {};
+  cbs.on_vsync = on_vsync;
+  esp_lcd_rgb_panel_register_event_callbacks(panel, &cbs, nullptr);
   esp_lcd_panel_reset(panel);
   esp_lcd_panel_init(panel);
   return esp_lcd_rgb_panel_get_frame_buffer(panel, 1, (void **)&fb) == ESP_OK;
@@ -176,6 +187,11 @@ bool board_init() {
 }
 
 uint16_t *board_fb() { return fb; }
+
+void board_wait_vsync() {
+  xSemaphoreTake(vsync_sem, 0);  // drop a stale edge, wait for a fresh one
+  xSemaphoreTake(vsync_sem, pdMS_TO_TICKS(50));
+}
 
 bool board_touch(int &x, int &y) {
   gt911_reg(0x814E);
