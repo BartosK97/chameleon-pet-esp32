@@ -6,6 +6,8 @@
 // Cheapest current model; short lines don't need thinking (allowed off at the default effort).
 static const char *MODEL = "claude-haiku-5-5";
 
+uint32_t ai_calls = 0, ai_in = 0, ai_out = 0;
+
 bool claude_ask(const char *key, const char *system, const String &user, int max_tokens, String &reply) {
   JsonDocument req;
   req["model"] = MODEL;
@@ -34,7 +36,10 @@ bool claude_ask(const char *key, const char *system, const String &user, int max
     return false;
   }
   JsonDocument doc;
-  if (deserializeJson(doc, resp) || doc["stop_reason"] == "refusal") return false;
+  if (deserializeJson(doc, resp)) return false;
+  int in = doc["usage"]["input_tokens"] | 0, out = doc["usage"]["output_tokens"] | 0;
+  ai_calls++, ai_in += in, ai_out += out;
+  if (doc["stop_reason"] == "refusal") return false;
   for (JsonObject block : doc["content"].as<JsonArray>())
     if (block["type"] == "text") {
       reply = block["text"].as<String>();

@@ -90,7 +90,7 @@ Without `secrets.h` the firmware runs offline. State is still saved, but without
 
 ### Talking fish
 
-Put an Anthropic API key in `secrets.h` as `ANTHROPIC_KEY`. The fish use Claude Haiku 5.5, the cheapest current model, with thinking off and short answers. A line costs roughly 300 input and 40 output tokens, about $0.00005 at $0.10 / $0.50 per million tokens. Lines come at most every 6 s and idle chatter every 4–8 min, so even a busy day of a few hundred lines costs around a cent. Speech, names, the diary and chat answers are in German.
+Put an Anthropic API key in `secrets.h` as `ANTHROPIC_KEY`. The fish use Claude Haiku 5.5, the cheapest current model, with thinking off and short answers. A line costs roughly 300 input and 40 output tokens, about $0.00005 at $0.10 / $0.50 per million tokens. Lines come at most every 20 s and idle chatter every 15–30 min, so a day costs well under a cent. The prompts are too short to cache (Haiku 5.5 caches from 512 tokens) and each is answered once, so caching and batching would only add cost or delay. Each call logs its tokens to the network log, and `/status` reports `ai_calls`, `ai_in` and `ai_out` since boot. Speech, names, the diary and chat answers are in German.
 
 All HTTPS (Claude and ntfy) runs in one task on core 0. TLS needs about 45 KB of internal RAM, which this build only has with Bluetooth off, so that task switches BLE off for the few seconds a call takes and back on afterwards. Certificates are checked against the built-in Mozilla bundle.
 

@@ -211,6 +211,13 @@ static String fish_system(int fish, const char *task) {
          " Schreibe auf Deutsch, ohne Emojis und ohne Anführungszeichen.";
 }
 
+static bool ask(const char *system, const String &user, int max_tokens, String &reply) {  // logs what each call bills
+  uint32_t in = ai_in, out = ai_out;
+  bool ok = ask(system, user, max_tokens, reply);
+  logf("claude %s: %u in, %u out tokens\n", ok ? "ok" : "failed", (unsigned)(ai_in - in), (unsigned)(ai_out - out));
+  return ok;
+}
+
 static void run_job(Job *j) {
   String reply;
   switch (j->type) {
@@ -221,7 +228,7 @@ static void run_job(Job *j) {
         String sys = fish_system(j->fish, "Antworte mit genau einem kurzen, witzigen Satz in Ich-Form, höchstens 70 Zeichen.");
         String user = String("Gerade passiert: ") + j->text + "\n" + tank_context(j->fish);
         xSemaphoreGive(pet_mux);
-        ok = claude_ask(api_key, sys.c_str(), user, 80, reply);
+        ok = ask(sys.c_str(), user, 80, reply);
       }
       show_line(j->fish, ok ? reply.c_str() : SITUATIONS[j->sit].canned[esp_random() % 3]);
       break;
@@ -233,7 +240,7 @@ static void run_job(Job *j) {
         String sys = fish_system(j->fish, "Ein Mensch schreibt dir über die Webseite des Aquariums. Antworte frech und kurz, höchstens zwei Sätze und 100 Zeichen, sonst passt es nicht in deine Sprechblase.");
         String user = String(j->text) + "\n(" + tank_context(j->fish) + ")";
         xSemaphoreGive(pet_mux);
-        ok = claude_ask(api_key, sys.c_str(), user, 120, reply);
+        ok = ask(sys.c_str(), user, 120, reply);
       }
       strlcpy(j->reply, ok ? reply.c_str() : "Blubb. Ohne Internet bin ich nicht so gesprächig.", sizeof j->reply);
       show_line(j->fish, j->reply);
@@ -249,7 +256,7 @@ static void run_job(Job *j) {
       for (int i = 0; i < FISH; i++)
         if (name_wanted[i] && pet_fish(i, f)) user += String(" slot ") + i + " " + SPECIES_DE[f.kind] + (f.size < 1 ? " (Baby)" : "") + ";";
       xSemaphoreGive(pet_mux);
-      if (!claude_ask(api_key, "Du gibst Fischen in einem kleinen Pixel-Aquarium Namen.", user, 300, reply)) break;
+      if (!ask("Du gibst Fischen in einem kleinen Pixel-Aquarium Namen.", user, 300, reply)) break;
       int a = reply.indexOf('['), b = reply.lastIndexOf(']');
       JsonDocument doc;
       if (a < 0 || b < a || deserializeJson(doc, reply.substring(a, b + 1))) break;
@@ -341,9 +348,9 @@ static void web_setup() {
     xSemaphoreTake(pet_mux, portMAX_DELAY);
     pet_status(st);
     xSemaphoreGive(pet_mux);
-    char b[200];
-    snprintf(b, sizeof b, "{\"w\":%d,\"h\":%d,\"alive\":%d,\"dead\":%d,\"young\":%d,\"hunger\":%.2f,\"hunger_max\":%.2f,\"visitors\":%d,\"lamp\":%s,\"sound\":%s,\"fps\":%u}",
-             CW, CH, st.alive, st.dead, st.young, st.hunger_avg, st.hunger_max, st.visitors_today, st.lamp_on ? "true" : "false", sound_on ? "true" : "false", last_fps);
+    char b[280];
+    snprintf(b, sizeof b, "{\"w\":%d,\"h\":%d,\"alive\":%d,\"dead\":%d,\"young\":%d,\"hunger\":%.2f,\"hunger_max\":%.2f,\"visitors\":%d,\"lamp\":%s,\"sound\":%s,\"fps\":%u,\"ai_calls\":%u,\"ai_in\":%u,\"ai_out\":%u}",
+             CW, CH, st.alive, st.dead, st.young, st.hunger_avg, st.hunger_max, st.visitors_today, st.lamp_on ? "true" : "false", sound_on ? "true" : "false", last_fps, (unsigned)ai_calls, (unsigned)ai_in, (unsigned)ai_out);
     web.send(200, "application/json", b);
   });
   web.on("/fish", HTTP_GET, [] {
