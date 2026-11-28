@@ -60,7 +60,8 @@ static struct {
   Bubble bubbles[BUBBLES] = {};
   Dust dust[DUST] = {};
   struct { float x, y, tx, ty; int dir; } snail = {70, SAND, 70, SAND, 1};
-  struct { int x, y; } rock[2] = {{24, SAND + 1}, {46, SAND + 6}}, weed[4] = {};  // rock centres, plant roots; both fall with the sand
+  struct { int x, y; float a; } rock[2] = {{24, SAND + 1, 0}, {46, SAND + 6, 0}};  // centre and turn; fall and roll with the sand
+  struct { int x, y; } weed[4] = {};  // plant roots, riding on top of the sand
   uint32_t last_ms = 0, last_feed = 0, last_approach = 0, last_visitor = 0, next_bubble = 0;
   float ripple_x = 0, ripple_y = 0;
   uint32_t ripple_t0 = 0;
@@ -201,23 +202,48 @@ static void solve_surface() {  // the level line that leaves the same air volume
 
 static float sand_top(int x) { return SAND + sinf(x * 0.08f) * 2.5f + sinf(x * 0.21f + 1) * 1.0f; }
 
-// Rock i's cells in the grid: v = ROCK stamps the free ones, v = 0 clears its ROCK cells.
-static void rock_mask(int i, uint8_t v) {
-  int cx = S.rock[i].x, cy = S.rock[i].y, rx = ROCK_R[i][0], ry = ROCK_R[i][1];
-  for (int y = cy - ry - 1; y <= cy + ry + 1; y++)
-    for (int x = cx - rx - 1; x <= cx + rx + 1; x++)
-      if (x >= 0 && x < CW && y >= 0 && y < CH && in_ell(x, y, cx, cy, rx, ry)) {
-        int g = cell(y * CW + x);
-        if (v ? !g : g == ROCK) put(y * CW + x, v);
-      }
+// Pixel spans of an ellipse with radii ex, ey turned by a about (cx, cy): row(y, x0, x1), one sqrt per row.
+// row returns false to stop early; the result says whether every row ran.
+template <class F> static bool ell_rows(float cx, float cy, float ex, float ey, float a, F row) {
+  float c = cosf(a), s = sinf(a), ix = 1 / (ex * ex), iy = 1 / (ey * ey);
+  float A = c * c * ix + s * s * iy, B = 2 * c * s * (ix - iy), D = s * s * ix + c * c * iy;
+  float R = ex > ey ? ex : ey;
+  for (int y = (int)floorf(cy - R), y1 = (int)ceilf(cy + R); y <= y1; y++) {
+    float dy = y + 0.5f - cy, b = B * dy, disc = b * b - 4 * A * (D * dy * dy - 1);
+    if (disc < 0) continue;
+    float r = sqrtf(disc);
+    int x0 = (int)ceilf(cx + (-b - r) / (2 * A) - 0.5f), x1 = (int)floorf(cx + (-b + r) / (2 * A) - 0.5f);
+    if (x0 <= x1 && !row(y, x0, x1)) return false;
+  }
+  return true;
 }
 
-static bool rock_fits(int i, int cx, int cy) {
-  int rx = ROCK_R[i][0], ry = ROCK_R[i][1];
-  for (int y = cy - ry - 1; y <= cy + ry + 1; y++)
-    for (int x = cx - rx - 1; x <= cx + rx + 1; x++)
-      if (in_ell(x, y, cx, cy, rx, ry) && solid(x, y)) return false;
-  return true;
+// Calls f(x, y) for every cell of rock i placed at (cx, cy) turned by a; stops early when f returns false.
+template <class F> static bool rock_cells(int i, int cx, int cy, float a, F f) {
+  return ell_rows(cx, cy, ROCK_R[i][0], ROCK_R[i][1], a, [&](int y, int x0, int x1) {
+    for (int x = x0; x <= x1; x++)
+      if (!f(x, y)) return false;
+    return true;
+  });
+}
+
+static bool in_rock(int i, int cx, int cy, float a, int x, int y) {
+  float c = cosf(a), s = sinf(a), dx = x + 0.5f - cx, dy = y + 0.5f - cy;
+  float u = (dx * c + dy * s) / ROCK_R[i][0], v = (dy * c - dx * s) / ROCK_R[i][1];
+  return u * u + v * v <= 1;
+}
+
+// Rock i's cells in the grid: v = ROCK stamps the free ones, v = 0 clears its ROCK cells.
+static void rock_mask(int i, uint8_t v) {
+  rock_cells(i, S.rock[i].x, S.rock[i].y, S.rock[i].a, [&](int x, int y) {
+    if (x >= 0 && x < CW && y >= 0 && y < CH && (v ? !cell(y * CW + x) : cell(y * CW + x) == ROCK)) put(y * CW + x, v);
+    return true;
+  });
+}
+
+static bool in_grid(int x, int y) { return x >= 0 && y >= 0 && x < CW && y < CH; }
+static bool rock_fits(int i, int cx, int cy, float a, bool push_sand = false) {  // push_sand: only glass and rocks block
+  return rock_cells(i, cx, cy, a, [&](int x, int y) { return !solid(x, y) || (push_sand && in_grid(x, y) && cell(y * CW + x) != ROCK); });
 }
 
 static void fill_sand() {
@@ -320,12 +346,29 @@ static int decor_step(float gx, float gy) {
     for (int k = 0; k < n; k++) {
       bool pair = k + 1 < n && d[k].k - d[k + 1].k < 1e-3f;
       int a = pair && (xr() & 1) ? k + 1 : k, b = a == k ? k + 1 : k;
-      int m = rock_fits(i, r.x + d[a].x, r.y + d[a].y) ? a : pair && rock_fits(i, r.x + d[b].x, r.y + d[b].y) ? b : -1;
+      int m = rock_fits(i, r.x + d[a].x, r.y + d[a].y, r.a) ? a : pair && rock_fits(i, r.x + d[b].x, r.y + d[b].y, r.a) ? b : -1;
       if (m >= 0) {
         r.x += d[m].x, r.y += d[m].y, moves++;
         break;
       }
       k += pair;
+    }
+    float turn = wrapf(-atan2f(gx, gy) - r.a), na = r.a + clampf(turn, -0.08f, 0.08f);  // flat side onto the new floor
+    if (fabsf(turn) > 0.04f && rock_fits(i, r.x, r.y, na, true)) {
+      rock_cells(i, r.x, r.y, na, [&](int x, int y) {  // grains in the way go up and over
+        if (int g = cell(y * CW + x)) {
+          put(y * CW + x, 0), count(x, y, -1);
+          for (int k = 1; k < 24; k++) {
+            int nx = (int)(x + 0.5f - gx * k), ny = (int)(y + 0.5f - gy * k);
+            if (!solid(nx, ny) && !in_rock(i, r.x, r.y, na, nx, ny)) {
+              put(ny * CW + nx, g), count(nx, ny, 1);
+              break;
+            }
+          }
+        }
+        return true;
+      });
+      r.a = na, moves++;
     }
     rock_mask(i, ROCK);
   }
@@ -719,7 +762,8 @@ void pet_update(const PetInput &in, PetOutput &out) {
     for (auto &b : S.bubbles)
       if (!b.live) {  // the bubbler on top of the big rock
         float o = rnd() * 3;
-        b = {S.rock[0].x - GX * 9 + GY * o, S.rock[0].y - GY * 9 - GX * o, 1 + rnd() * 1.6f, rnd() * 6.28f, true};
+        float c = cosf(S.rock[0].a), s = sinf(S.rock[0].a);
+        b = {S.rock[0].x + 9 * s + c * o, S.rock[0].y - 9 * c + s * o, 1 + rnd() * 1.6f, rnd() * 6.28f, true};
         break;
       }
     S.next_bubble = now + 250 + (uint32_t)(rnd() * 600);
@@ -775,12 +819,18 @@ static void draw_water(float t) {
       for (int x = 0; x < CW; x++)
         if (int g = cell(y * CW + x); g && g != ROCK) row[x] = SANDC[g];
   }
-  for (int i = 1; i >= 0; i--) {  // rocks, big one in front with a highlight up and to the left
-    float x = S.rock[i].x, y = S.rock[i].y, rx = ROCK_R[i][0], ry = ROCK_R[i][1];
-    ell(x, y, rx, ry, OUTLINE);
-    ell(x, y, rx - 1, ry - 1, i ? rgb(105, 110, 120) : rgb(120, 125, 135));
-    bool side = fabsf(GX) > fabsf(GY);
-    if (!i) ell(x - 4 * GY - 4 * GX, y + 4 * GX - 4 * GY, side ? 3 : 7, side ? 7 : 3, rgb(150, 155, 165));
+  for (int i = 1; i >= 0; i--) {  // rocks turned with their own angle; the big one in front, lit up and to the left
+    const auto &k = S.rock[i];
+    float c = cosf(k.a), s = sinf(k.a), rx = ROCK_R[i][0], ry = ROCK_R[i][1];
+    auto blob = [&](float ox, float oy, float ex, float ey, uint16_t col) {  // ellipse at rock-local offset, turned by a
+      ell_rows(k.x + ox * c - oy * s, k.y + ox * s + oy * c, ex, ey, k.a, [&](int y, int x0, int x1) {
+        for (int x = x0; x <= x1; x++) px(x, y, col);
+        return true;
+      });
+    };
+    blob(0, 0, rx, ry, OUTLINE);
+    blob(0, 0, rx - 1, ry - 1, i ? rgb(105, 110, 120) : rgb(120, 125, 135));
+    if (!i) blob(-4, -4, 7, 3, rgb(150, 155, 165));
   }
 }
 
