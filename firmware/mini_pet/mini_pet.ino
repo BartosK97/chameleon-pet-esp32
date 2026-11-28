@@ -213,7 +213,7 @@ static String fish_system(int fish, const char *task) {
 
 static bool ask(const char *system, const String &user, int max_tokens, String &reply) {  // logs what each call bills
   uint32_t in = ai_in, out = ai_out;
-  bool ok = ask(system, user, max_tokens, reply);
+  bool ok = claude_ask(api_key, system, user, max_tokens, reply);
   logf("claude %s: %u in, %u out tokens\n", ok ? "ok" : "failed", (unsigned)(ai_in - in), (unsigned)(ai_out - out));
   return ok;
 }
@@ -274,10 +274,9 @@ static void run_job(Job *j) {
       break;
     }
     case JOB_DIARY: {
-      bool ok = api_key && claude_ask(api_key,
-                                      "Du schreibst das Tagebuch eines kleinen Pixel-Aquariums aus Sicht der Fische. "
-                                      "Schreibe 2 bis 3 kurze, witzige Sätze auf Deutsch, höchstens 300 Zeichen, ohne Emojis.",
-                                      j->text, 250, reply);
+      bool ok = api_key && ask("Du schreibst das Tagebuch eines kleinen Pixel-Aquariums aus Sicht der Fische. "
+                               "Schreibe 2 bis 3 kurze, witzige Sätze auf Deutsch, höchstens 300 Zeichen, ohne Emojis.",
+                               j->text, 250, reply);
 #ifdef NTFY_TOPIC
       ntfy_push(NTFY_TOPIC, "Aquarium-Tagebuch", ok ? reply.c_str() : j->text);
 #endif
