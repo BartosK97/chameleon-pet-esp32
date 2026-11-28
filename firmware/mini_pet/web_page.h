@@ -1,4 +1,4 @@
-// Served at http://mini-pet.local/ : live view, feed/lamp buttons, status. Polls /status and /frame.
+// Served at http://mini-pet.local/ : live view, feed/lamp/sound buttons, status. Polls /status and /frame.
 #pragma once
 
 static const char WEB_PAGE[] = R"HTML(<!doctype html>
@@ -12,7 +12,7 @@ canvas{width:100%;image-rendering:pixelated;border-radius:14px;background:#123;d
 .row{display:flex;gap:8px;margin:12px 0}
 button{flex:1;padding:14px;border:0;border-radius:12px;font-size:16px;font-weight:600;background:#1e88e5;color:#fff}
 button:active{transform:scale(.97)}
-#lamp{background:#f5b301;color:#222}
+#lamp{background:#f5b301;color:#222}#sound{background:#123a5c}
 .grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
 .card{background:#123a5c;border-radius:12px;padding:10px 12px;font-size:13px;opacity:.95}
 .card b{display:block;font-size:22px;margin-top:2px}
@@ -28,7 +28,7 @@ form{display:flex;gap:8px}input{flex:1;padding:12px;border-radius:12px;border:0;
 </style></head><body>
 <h1>Pocket Aquarium</h1>
 <canvas id="view" width="120" height="160"></canvas>
-<div class="row"><button id="feed">Feed</button><button id="lamp">Lamp</button></div>
+<div class="row"><button id="feed">Feed</button><button id="lamp">Lamp</button><button id="sound">Sound</button></div>
 <p id="msg"></p>
 <div class="grid">
   <div class="card">Food<b id="food">-</b><div class="bar"><i id="foodbar"></i></div></div>
@@ -66,6 +66,7 @@ async function status() {
     $('fish').textContent = s.alive + (s.young ? ' (' + s.young + ' young)' : '') + (s.dead ? ', ' + s.dead + ' dead' : '');
     $('vis').textContent = s.visitors;
     $('lmp').textContent = s.lamp ? 'on' : 'off';
+    $('sound').textContent = s.sound ? 'Sound on' : 'Sound off';
   } catch (e) {}
   setTimeout(status, 2000);
 }
@@ -74,6 +75,7 @@ $('feed').onclick = async () => {
   $('msg').textContent = r.ok ? 'Food is on its way.' : 'They were just fed. Try again in a few seconds.';
 };
 $('lamp').onclick = async () => { await fetch('/lamp', {method: 'POST'}); status(); };
+$('sound').onclick = async () => { await fetch('/sound', {method: 'POST'}); status(); };
 async function fish() {
   try {
     const list = await (await fetch('/fish')).json();

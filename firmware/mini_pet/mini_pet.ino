@@ -168,8 +168,10 @@ static const struct { const char *prompt, *canned[3]; } SITUATIONS[] = {
 
 static QueueHandle_t jobs;
 static volatile int babble_left = 0;  // chirps the frame loop plays while a fish talks
+static volatile bool sound_on = true;  // web page toggle, kept in prefs
+static void buzz(bool on) { board_buzzer(on && sound_on); }
 static volatile bool lamp_is_on = true;
-static uint32_t next_line = 20000, next_idle = 120000, line_gap = 0;
+static uint32_t next_line = 60000, next_idle = 600000, line_gap = 0;
 
 static bool queue_job(Job *j) {
   if (jobs && xQueueSend(jobs, &j, 0) == pdTRUE) return true;
@@ -183,7 +185,7 @@ static void show_line(int fish, const char *text) {
   xSemaphoreTake(pet_mux, portMAX_DELAY);
   pet_say(fish, b, millis());
   xSemaphoreGive(pet_mux);
-  if (lamp_is_on) babble_left = min(10, (int)strlen(text) / 6 + 2);
+  if (lamp_is_on) babble_left = min(5, (int)strlen(text) / 10 + 2);
 }
 
 static String tank_context(int fish) {
@@ -297,6 +299,9 @@ static void net_task(void *) {
 
 static void notify(const char *title, const char *msg) {
 #ifdef NTFY_TOPIC
+  static uint32_t last_push = 0;  // at most one push per 30 min; the diary goes its own way
+  if (last_push && millis() - last_push < 30 * 60000) return logf("push dropped: %s\n", title);
+  last_push = millis();
   Job *j = new Job{JOB_PUSH};
   strlcpy(j->title, title, sizeof j->title);
   strlcpy(j->text, msg, sizeof j->text);
@@ -316,12 +321,12 @@ static int pick_fish(int avoid = -1) {
 static void request_line(int sit, int fish, bool important, uint32_t now) {
   if (fish < 0) fish = pick_fish();
   if (fish < 0 || now < line_gap || (!important && now < next_line)) return;
-  line_gap = now + 6000, next_line = now + 40000, next_idle = now + 240000 + esp_random() % 240000;
+  line_gap = now + 20000, next_line = now + 180000, next_idle = now + 900000 + esp_random() % 900000;
   if (!jobs) {  // offline: canned line right away
     char b[120];
     snprintf(b, sizeof b, "%s: %s", names.name[fish], SITUATIONS[sit].canned[esp_random() % 3]);
     pet_say(fish, b, now);
-    if (lamp_is_on) babble_left = 4;
+    if (lamp_is_on) babble_left = 3;
     return;
   }
   Job *j = new Job{JOB_SAY, fish, sit};
@@ -337,8 +342,8 @@ static void web_setup() {
     pet_status(st);
     xSemaphoreGive(pet_mux);
     char b[200];
-    snprintf(b, sizeof b, "{\"w\":%d,\"h\":%d,\"alive\":%d,\"dead\":%d,\"young\":%d,\"hunger\":%.2f,\"hunger_max\":%.2f,\"visitors\":%d,\"lamp\":%s,\"fps\":%u}",
-             CW, CH, st.alive, st.dead, st.young, st.hunger_avg, st.hunger_max, st.visitors_today, st.lamp_on ? "true" : "false", last_fps);
+    snprintf(b, sizeof b, "{\"w\":%d,\"h\":%d,\"alive\":%d,\"dead\":%d,\"young\":%d,\"hunger\":%.2f,\"hunger_max\":%.2f,\"visitors\":%d,\"lamp\":%s,\"sound\":%s,\"fps\":%u}",
+             CW, CH, st.alive, st.dead, st.young, st.hunger_avg, st.hunger_max, st.visitors_today, st.lamp_on ? "true" : "false", sound_on ? "true" : "false", last_fps);
     web.send(200, "application/json", b);
   });
   web.on("/fish", HTTP_GET, [] {
@@ -391,6 +396,12 @@ static void web_setup() {
     last_active = millis();
     xSemaphoreGive(pet_mux);
     web.send(200, "application/json", "{\"ok\":true}");
+  });
+  web.on("/sound", HTTP_POST, [] {
+    sound_on = !sound_on;
+    if (!sound_on) board_buzzer(false);
+    prefs.putBool("sound", sound_on);
+    web.send(200, "application/json", sound_on ? "{\"sound\":true}" : "{\"sound\":false}");
   });
   web.on("/frame", HTTP_GET, [] {  // raw RGB565 canvas, little endian
     xSemaphoreTake(pet_mux, portMAX_DELAY);
@@ -488,6 +499,7 @@ void setup() {
   PetSave s;
   if (prefs.getBytes("pet", &s, sizeof s) == sizeof s) pet_load(s);
   saved_ts = prefs.getULong("ts", 0);
+  sound_on = prefs.getBool("sound", true);
   if (prefs.getBytes("names", &names, sizeof names) != sizeof names) memset(&names, 0, sizeof names);
   PetFish f;
   for (int i = 0; i < FISH; i++)
@@ -499,7 +511,7 @@ void setup() {
   logf("mini-pet ready\n");
 }
 
-// Paced by the panel (~42 Hz): push the frame drawn last time right after vsync, then draw the next one
+// Paced by the panel (~36 Hz): push the frame drawn last time right after vsync, then draw the next one
 // while the panel scans out; waiting and drawing no longer add up.
 void loop() {
   static bool drawn = false;
@@ -606,7 +618,7 @@ void loop() {
   if (out.events & EV_LAMP) request_line(ps.lamp_on ? SIT_LIGHT_ON : SIT_LIGHT_OFF, -1, true, now);
   if (out.tapped_fish >= 0) request_line(SIT_TAP, out.tapped_fish, true, now);
   if (in.shake) request_line(SIT_SHAKE, -1, true, now);
-  if (orient != last_orient) last_orient = orient, request_line(SIT_TURN, -1, true, now);
+  if (orient != last_orient) last_orient = orient, request_line(SIT_TURN, -1, false, now);
   float side = orient == 0 ? gx : orient == 1 ? -gy : orient == 2 ? -gx : gy;  // tilt across the upright view
   tilt_since = fabsf(side) > 0.4f ? (tilt_since ? tilt_since : now) : 0;
   if (tilt_since && now - tilt_since > 1500) request_line(SIT_TILT, -1, false, now);
@@ -635,8 +647,9 @@ void loop() {
     last_state[i] = st;
   }
   if (naming && api_key) queue_job(new Job{JOB_NAMES});
-  static int alert = 0;  // 0 nothing sent, 1 hungry, 2 starving; re-arms once they are fed again
+  static int alert = prefs.getUChar("alert", 0);  // 0 nothing sent, 1 hungry, 2 starving; re-arms once fed; survives reboots
   if (clock_synced && now >= next_alert) {
+    int alert_was = alert;
     next_alert = now + 10000;
     PetStatus st;
     pet_status(st);
@@ -645,6 +658,7 @@ void loop() {
     else if (st.alive && st.hunger_max > 0.6f && alert < 1)
       alert = 1, notify("Die Fische haben Hunger", "Geh mit dem Handy am Aquarium vorbei, um sie zu füttern."), request_line(SIT_HUNGRY, -1, true, now);
     else if (st.hunger_max < 0.4f) alert = 0;
+    if (alert != alert_was) prefs.putUChar("alert", alert);
   }
   if (out.events) next_save = min(next_save, now + 5000);
   static int backlight = -1;  // fades out over ~2 s when idle, back in within a few frames
@@ -669,18 +683,18 @@ void loop() {
     next_save = now + SAVE_MS;
   }
   if (out.beep_ms) {
-    board_buzzer(true);
+    buzz(true);
     beep_until = now + out.beep_ms;
   }
   if (beep_until && now > beep_until) {
-    board_buzzer(false);
+    buzz(false);
     beep_until = 0;
   }
   static uint32_t babble_next = 0;  // talking fish: short chirps with uneven gaps
   static bool babble_high = false;
   if (!beep_until && babble_left > 0 && now >= babble_next) {
     babble_high = !babble_high;
-    board_buzzer(babble_high);
+    buzz(babble_high);
     babble_next = now + (babble_high ? 18 : 40 + esp_random() % 70);
     if (!babble_high) babble_left--;
   }
