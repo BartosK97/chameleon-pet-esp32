@@ -1,12 +1,13 @@
 #include "board.h"
 #include <Wire.h>
+#include <initializer_list>
 #include "driver/spi_master.h"
 #include "esp_lcd_panel_ops.h"
 #include "esp_lcd_panel_rgb.h"
 
 // Pins and ST7701 init table from Waveshare's 2.8B Arduino demo.
 static const int I2C_SDA = 15, I2C_SCL = 7, BL_PIN = 6, INIT_SDA = 1, INIT_SCL = 2, TOUCH_INT = 16;
-static const uint8_t EXP_ADDR = 0x20;
+static const uint8_t EXP_ADDR = 0x20, IMU_ADDR = 0x6B;
 static uint8_t gt911_addr = 0x5D;
 enum { EXP_LCD_RST = 0, EXP_TP_RST = 1, EXP_LCD_CS = 2, EXP_BUZZER = 7 };  // bit = EXIOn - 1
 
@@ -14,6 +15,13 @@ static uint8_t exp_out = 0x7F;  // power-on default 0xFF would leave buzzer on
 static spi_device_handle_t spi;
 static esp_lcd_panel_handle_t panel;
 static uint16_t *fb;
+static SemaphoreHandle_t vsync_sem;
+
+static bool IRAM_ATTR on_vsync(esp_lcd_panel_handle_t, const esp_lcd_rgb_panel_event_data_t *, void *) {
+  BaseType_t woken = pdFALSE;
+  xSemaphoreGiveFromISR(vsync_sem, &woken);
+  return woken == pdTRUE;
+}
 
 static void exp_write(uint8_t reg, uint8_t v) {
   Wire.beginTransmission(EXP_ADDR);
@@ -111,7 +119,7 @@ static bool rgb_init() {
   static const int data[16] = {5, 45, 48, 47, 21, 14, 13, 12, 11, 10, 9, 46, 3, 8, 18, 17};
   esp_lcd_rgb_panel_config_t cfg = {};
   cfg.clk_src = LCD_CLK_SRC_PLL240M;
-  cfg.timings.pclk_hz = 30 * 1000 * 1000;
+  cfg.timings.pclk_hz = 15 * 1000 * 1000;  // ~35 Hz: a turning frame (~22 ms) fits, so no 42/21 fps judder; less PSRAM scanout
   cfg.timings.h_res = LCD_W;
   cfg.timings.v_res = LCD_H;
   cfg.timings.hsync_pulse_width = 10;
@@ -134,6 +142,10 @@ static bool rgb_init() {
   for (int i = 0; i < 16; i++) cfg.data_gpio_nums[i] = (gpio_num_t)data[i];
   cfg.flags.fb_in_psram = 1;
   if (esp_lcd_new_rgb_panel(&cfg, &panel) != ESP_OK) return false;
+  vsync_sem = xSemaphoreCreateBinary();
+  esp_lcd_rgb_panel_event_callbacks_t cbs = {};
+  cbs.on_vsync = on_vsync;
+  esp_lcd_rgb_panel_register_event_callbacks(panel, &cbs, nullptr);
   esp_lcd_panel_reset(panel);
   esp_lcd_panel_init(panel);
   return esp_lcd_rgb_panel_get_frame_buffer(panel, 1, (void **)&fb) == ESP_OK;
@@ -155,7 +167,12 @@ bool board_init() {
   exp_set(EXP_LCD_RST, true);
   delay(50);
   st7701_init();
-  if (!rgb_init()) return false;
+  // The panel's bounce-buffer ISR copies the frame out of PSRAM all the time and runs on the core that created the
+  // panel; create it on core 0 so the game loop on core 1 keeps its CPU when WiFi slows PSRAM down.
+  static volatile int rgb_ok = -1;
+  xTaskCreatePinnedToCore([](void *) { rgb_ok = rgb_init(); vTaskDelete(nullptr); }, "rgb_init", 4096, nullptr, 5, nullptr, 0);
+  while (rgb_ok < 0) delay(1);
+  if (!rgb_ok) return false;
 
   // GT911 latches its I2C address from INT during reset: low selects 0x5D
   pinMode(TOUCH_INT, OUTPUT);
@@ -170,12 +187,25 @@ bool board_init() {
     if (Wire.endTransmission() == 0) { gt911_addr = a; break; }
   }
 
+  // QMI8658 as Waveshare runs it: auto-increment, accel +-4 g, accel LPF, accel+gyro with the fast clock (CTRL7 0x43)
+  for (auto rv : {0x0240, 0x0310, 0x0601, 0x0700, 0x0843}) {
+    Wire.beginTransmission(IMU_ADDR);
+    Wire.write(rv >> 8);
+    Wire.write(rv & 0xFF);
+    Wire.endTransmission();
+  }
+
   ledcAttach(BL_PIN, 20000, 10);
   board_backlight(80);
   return true;
 }
 
 uint16_t *board_fb() { return fb; }
+
+void board_wait_vsync() {
+  xSemaphoreTake(vsync_sem, 0);  // drop a stale edge, wait for a fresh one
+  xSemaphoreTake(vsync_sem, pdMS_TO_TICKS(50));
+}
 
 bool board_touch(int &x, int &y) {
   gt911_reg(0x814E);
@@ -189,6 +219,20 @@ bool board_touch(int &x, int &y) {
   if (!down) return false;
   x = b[2] | (b[3] << 8);
   y = b[4] | (b[5] << 8);
+  return true;
+}
+
+bool board_accel(float &x, float &y, float &z) {
+  Wire.beginTransmission(IMU_ADDR);
+  Wire.write(0x35);
+  if (Wire.endTransmission() != 0 || Wire.requestFrom(IMU_ADDR, (uint8_t)6) != 6) return false;
+  int16_t v[3];
+  for (auto &a : v) {
+    int lo = Wire.read();  // two reads in one expression would be unsequenced
+    a = lo | (Wire.read() << 8);
+  }
+  if (v[0] == -32768 && v[1] == -32768 && v[2] == -32768) return false;  // no sample yet
+  x = v[0] / 8192.0f, y = v[1] / 8192.0f, z = v[2] / 8192.0f;
   return true;
 }
 
