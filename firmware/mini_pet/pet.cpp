@@ -3,6 +3,9 @@
 #include <string.h>
 #include <initializer_list>
 #include "font_tomthumb.h"
+#ifdef ARDUINO
+#pragma GCC optimize("O2")  // Arduino builds with -Os; drawing ran 1.5x faster at O2
+#endif
 
 static constexpr uint16_t rgb(int r, int g, int b) { return ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3); }
 
@@ -20,13 +23,16 @@ static const int LAMP_ON_MIN = 7 * 60, LAMP_OFF_MIN = 22 * 60;
 static const float NIGHT = 0.5f;  // scene brightness with the lamp off; the backlight dims on top
 static const float PI_F = 3.14159265f;
 static const int SURFACE = 18, SAND = CH - 20;  // portrait layout at start; the air keeps SURFACE rows' worth of area in any pose
-static const float SAND_STEPS_PER_S = 40, REPOSE = 0.44f;  // grains slide down slopes steeper than asin(REPOSE) ~ 26 deg
+static const float SAND_STEPS_PER_S = 60;  // half-grid steps, at most one a frame
+static const float REPOSE = 0.3f;  // grains slide down slopes steeper than asin(REPOSE) ~ 17 deg; 0.44 froze a bed tilted 45 deg
+static const float WEED_X[] = {40, 32, 23, 13}, WEED_H[] = {58, 72, 50, 64}, WEED_P[] = {0, 1.7f, 3.1f, 4.4f};  // start X from the right edge
+static const int ROCK_R[2][2] = {{15, 9}, {8, 5}};
 static const int FLAKES = 24, BUBBLES = 14, DUST = 48, HIST = 112;
 
 static const uint16_t AIR = rgb(226, 240, 244), OUTLINE = rgb(20, 30, 45), WHITE = rgb(250, 250, 245);
 static const uint16_t BAR_BG = rgb(255, 255, 255), FOOD_BAR = rgb(250, 160, 60), BUBBLE = rgb(215, 245, 255);
 static const uint16_t SAND_C = rgb(222, 200, 150), INK = rgb(60, 70, 80);
-static const uint16_t SANDC[4] = {SAND_C, SAND_C, rgb(190, 165, 115), rgb(240, 225, 185)};
+static const uint16_t SANDC[3] = {SAND_C, SAND_C, rgb(190, 165, 115)};
 
 struct Species { float rx, ry, speed; uint16_t body, belly, tail; int pattern; };
 enum { CLOWN, TANG, YELLOW, NEON };
@@ -54,11 +60,12 @@ static struct {
   Bubble bubbles[BUBBLES] = {};
   Dust dust[DUST] = {};
   struct { float x, y, tx, ty; int dir; } snail = {70, SAND, 70, SAND, 1};
+  struct { int x, y; } rock[2] = {{24, SAND + 1}, {46, SAND + 6}}, weed[4] = {};  // rock centres, plant roots; both fall with the sand
   uint32_t last_ms = 0, last_feed = 0, last_approach = 0, last_visitor = 0, next_bubble = 0;
   float ripple_x = 0, ripple_y = 0;
   uint32_t ripple_t0 = 0;
   float wa = 0, wa_v = 0, wa_target = 0;  // water's down as an angle (0 = screen bottom); lags gravity like a damped spring
-  float sand_acc = 0, sand_rest = 99;     // grain steps owed; gravity angle the sand last settled under
+  float sand_acc = 0, sand_rest = 99, sand_a = 0;  // grain steps owed; angle the sand settled under; angle it flows under
   int sand_idle = 0;
   bool sand_awake = true;
   int rot = 0;
@@ -80,18 +87,23 @@ static uint32_t xr() { xs ^= xs << 13, xs ^= xs >> 17, xs ^= xs << 5; return xs;
 static float clampf(float v, float lo, float hi) { return v < lo ? lo : v > hi ? hi : v; }
 static float wrapf(float a) { return a > PI_F ? a - 2 * PI_F : a < -PI_F ? a + 2 * PI_F : a; }
 
-// Sand grid in the host's scratch buffer: 0 water, 1-3 grain colour, ROCK. moved[] stamps grains that moved this step.
-static const uint8_t ROCK = 0x40;
-static uint8_t *G, *moved, stamp;
+// Sand grid, 2 bits a cell so it fits internal RAM (PSRAM made a sand step 11 ms once WiFi runs): 0 water, 1-2 grain
+// colour, ROCK. row_n/col_n count grains so the step and the water skip empty lines.
+static const uint8_t ROCK = 3;
+static uint8_t P[CW * CH / 4], row_n[CH], col_n[CW];
+static inline int cell(int i) { return P[i >> 2] >> ((i & 3) * 2) & 3; }
+static inline void put(int i, int v) { uint8_t &b = P[i >> 2]; int s = (i & 3) * 2; b = (b & ~(3 << s)) | v << s; }
+static void count(int x, int y, int d) { row_n[y] += d, col_n[x] += d; }
 static uint16_t *ovl, *spr;  // HUD layer while the view turns; one creature at a time, drawn upright before rotating
 static const int SP = 48;
 static const uint16_t KEY = 0x0821;  // transparent in ovl and spr
-static bool solid(int x, int y) { return x < 0 || y < 0 || x >= CW || y >= CH || G[y * CW + x]; }
+static bool solid(int x, int y) { return x < 0 || y < 0 || x >= CW || y >= CH || cell(y * CW + x); }
 
 // Water: GX/GY = unit "down" of the surface, SURF_S = dot(p, g) along the surface line.
 static float GX = 0, GY = 1, SURF_S = SURFACE;
 static float depth(float x, float y) { return GX * x + GY * y - SURF_S; }  // > 0 under water
 static float SIN[256];
+static float fsin(float a) { return SIN[(int)(a * 40.743665f) & 255]; }  // 256-step table; libm sits in flash
 static float wave(float u, float t) { return 1.2f * SIN[(int)((1.8f * t + 0.18f * u) * 40.743665f) & 255]; }
 
 // ---- drawing ----
@@ -103,7 +115,7 @@ static const int EX[4][2] = {{1, 0}, {0, -1}, {-1, 0}, {0, 1}};  // frame x axis
 
 static void frame(int r) { R = r, W = r & 1 ? CH : CW, H = r & 1 ? CW : CH; }
 
-static uint16_t *at(int x, int y) {
+static inline uint16_t *at(int x, int y) {
   switch (R) {
     case 0: return C + y * W + x;
     case 1: return C + (CH - 1 - x) * CW + y;
@@ -121,8 +133,15 @@ static void to_frame(int r, float X, float Y, float &x, float &y) {
   }
 }
 
-static void px(int x, int y, uint16_t c) {
-  if (x >= 0 && x < W && y >= 0 && y < H) *at(x, y) = c;
+static int bx0, by0, bx1, by1;  // canvas box px() touched while drawing into ovl
+static inline void px(int x, int y, uint16_t c) {
+  if (x < 0 || x >= W || y < 0 || y >= H) return;
+  uint16_t *p = at(x, y);
+  *p = c;
+  if (C == ovl) {
+    int i = p - C, cx = i % CW, cy = i / CW;
+    bx0 = cx < bx0 ? cx : bx0, bx1 = cx > bx1 ? cx : bx1, by0 = cy < by0 ? cy : by0, by1 = cy > by1 ? cy : by1;
+  }
 }
 
 static bool in_ell(float x, float y, float cx, float cy, float rx, float ry) {
@@ -182,70 +201,144 @@ static void solve_surface() {  // the level line that leaves the same air volume
 
 static float sand_top(int x) { return SAND + sinf(x * 0.08f) * 2.5f + sinf(x * 0.21f + 1) * 1.0f; }
 
-static void rock_mask(float cx, float cy, float rx, float ry) {
-  for (int y = (int)(cy - ry - 1); y <= (int)(cy + ry + 1); y++)
-    for (int x = (int)(cx - rx - 1); x <= (int)(cx + rx + 1); x++)
-      if (x >= 0 && x < CW && y >= 0 && y < CH && in_ell(x, y, cx, cy, rx, ry)) G[y * CW + x] = ROCK;
+// Rock i's cells in the grid: v = ROCK stamps the free ones, v = 0 clears its ROCK cells.
+static void rock_mask(int i, uint8_t v) {
+  int cx = S.rock[i].x, cy = S.rock[i].y, rx = ROCK_R[i][0], ry = ROCK_R[i][1];
+  for (int y = cy - ry - 1; y <= cy + ry + 1; y++)
+    for (int x = cx - rx - 1; x <= cx + rx + 1; x++)
+      if (x >= 0 && x < CW && y >= 0 && y < CH && in_ell(x, y, cx, cy, rx, ry)) {
+        int g = cell(y * CW + x);
+        if (v ? !g : g == ROCK) put(y * CW + x, v);
+      }
+}
+
+static bool rock_fits(int i, int cx, int cy) {
+  int rx = ROCK_R[i][0], ry = ROCK_R[i][1];
+  for (int y = cy - ry - 1; y <= cy + ry + 1; y++)
+    for (int x = cx - rx - 1; x <= cx + rx + 1; x++)
+      if (in_ell(x, y, cx, cy, rx, ry) && solid(x, y)) return false;
+  return true;
 }
 
 static void fill_sand() {
-  memset(G, 0, CW * CH * 2);
-  rock_mask(24, SAND + 1, 15, 9);  // decor is glued to the glass; sand flows around it
-  rock_mask(44, SAND + 6, 8, 5);
+  memset(P, 0, sizeof P);
+  memset(row_n, 0, sizeof row_n), memset(col_n, 0, sizeof col_n);
+  rock_mask(0, ROCK), rock_mask(1, ROCK);  // sand flows around the rocks
+  for (int s = 0; s < 4; s++) S.weed[s].x = CW - (int)WEED_X[s], S.weed[s].y = (int)sand_top(CW - (int)WEED_X[s]) - 1;
   for (int x = 0; x < CW; x++)
     for (int y = (int)sand_top(x); y < CH; y++) {
       uint32_t h = (x * 73856093u) ^ (y * 19349663u);
-      uint8_t &g = G[y * CW + x];
-      if (!g) g = h % 11 == 0 ? 2 : h % 17 == 0 ? 3 : 1;
+      if (!cell(y * CW + x)) put(y * CW + x, h % 7 == 0 ? 2 : 1), count(x, y, 1);
     }
 }
 
 // Moves a grain may make under gravity (gx, gy): the 5x5 neighbourhood below the angle of repose, steepest first.
-struct Step { int8_t x, y, mx, my; float k; };
+struct Step { int8_t x, y, nb, nb2; bool two; float k; };  // nb: neighbour bit of the target, or of the middle cells (two)
 static Step steps[24];
-static int nsteps;
+static int nsteps, nneed, need_k[8], need_off[8];  // neighbours some step starts through: the only ones a grain reads
 
 static void sand_steps(float gx, float gy) {
-  nsteps = 0;
+  nsteps = nneed = 0;
+  int need = 0;
   for (int y = -2; y <= 2; y++)
     for (int x = -2; x <= 2; x++) {
       float len = sqrtf((float)(x * x + y * y)), p = x * gx + y * gy;
       if (len == 0 || p < REPOSE * len) continue;
-      Step s = {(int8_t)x, (int8_t)y, (int8_t)(x / 2), (int8_t)(y / 2), p + 0.3f * p / len};
+      bool two = x * x > 1 || y * y > 1;
+      int mx = two ? x / 2 : x, my = two ? y / 2 : y;
+      int mx2 = two && x % 2 ? x - x / 2 : mx, my2 = two && y % 2 ? y - y / 2 : my;  // a knight's move passes either cell beside its path
+      Step s = {(int8_t)x, (int8_t)y, (int8_t)((my + 1) * 3 + mx + 1), (int8_t)((my2 + 1) * 3 + mx2 + 1), two, p + 0.3f * p / len};
       int i = nsteps++;
       for (; i > 0 && steps[i - 1].k < s.k; i--) steps[i] = steps[i - 1];
       steps[i] = s;
+      need |= 1 << s.nb | 1 << s.nb2;
     }
+  for (int k = 0; k < 9; k++)
+    if (need >> k & 1) need_k[nneed] = k, need_off[nneed++] = (k / 3 - 1) * CW + k % 3 - 1;
 }
 
-static bool try_step(int x, int y, const Step &s) {
+static inline bool try_step(int x, int y, int free, const Step &s) {  // free: bit (dy+1)*3+dx+1 set = that neighbour is empty
   int nx = x + s.x, ny = y + s.y;
-  if (solid(nx, ny) || ((s.mx || s.my) && solid(x + s.mx, y + s.my))) return false;  // two-cell moves need a free middle
-  G[ny * CW + nx] = G[y * CW + x], G[y * CW + x] = 0, moved[ny * CW + nx] = stamp;
+  if (!((free >> s.nb | free >> s.nb2) & 1) || (s.two && solid(nx, ny))) return false;  // two-cell moves need a free middle
+  put(ny * CW + nx, cell(y * CW + x)), put(y * CW + x, 0), count(x, y, -1), count(nx, ny, 1);
   return true;
 }
 
-// One step of falling sand, scanned from the low side so grains below move out of the way first.
-static int sand_step(float gx, float gy) {
-  if (!++stamp) memset(moved, 0, CW * CH), stamp = 1;
+// One step of falling sand, scanned from the low side so grains below move out of the way first. Moves land in lines
+// already scanned, bar the odd uphill knight's move, so grains don't move twice and no visited mark is needed.
+static int sand_step(float gx, float gy, int half) {  // half: only lines of this parity move; the other half next frame
   uint32_t r = xr();
   int xd = gx > 0.05f ? -1 : gx < -0.05f ? 1 : (r & 1 ? -1 : 1), yd = gy > 0.05f ? -1 : gy < -0.05f ? 1 : (r & 2 ? -1 : 1);
   int x0 = xd < 0 ? CW - 1 : 0, y0 = yd < 0 ? CH - 1 : 0, moves = 0;
   bool rows = fabsf(gy) >= fabsf(gx);
-  for (int a = 0, na = rows ? CH : CW, nb = rows ? CW : CH; a < na; a++)
+  for (int a = half, na = rows ? CH : CW, nb = rows ? CW : CH; a < na; a += 2) {
+    if (!(rows ? row_n[y0 + yd * a] : col_n[x0 + xd * a])) continue;
     for (int b = 0; b < nb; b++) {
       int x = x0 + xd * (rows ? b : a), y = y0 + yd * (rows ? a : b), i = y * CW + x;
-      uint8_t g = G[i];
-      if (!g || g == ROCK || moved[i] == stamp || !(xr() & 7)) continue;  // 1 in 8 waits a step: flows grainy, not as a block
+      if (rows && (x & 3) == (xd > 0 ? 0 : 3) && !P[i >> 2]) {  // four empty cells at once
+        b += 3;
+        continue;
+      }
+      int g = cell(i);
+      if (!g || g == ROCK) continue;
+      if (!(xr() & 7)) continue;  // 1 in 8 waits a step: flows grainy, not as a block
+      int free = 0;
+      if (x > 0 && y > 0 && x < CW - 1 && y < CH - 1)
+        for (int j = 0; j < nneed; j++) free |= !cell(i + need_off[j]) << need_k[j];
+      else
+        for (int j = 0; j < nneed; j++) free |= !solid(x + need_k[j] % 3 - 1, y + need_k[j] / 3 - 1) << need_k[j];
+      if (!free) continue;  // buried: most grains
       for (int k = 0; k < nsteps; k++) {
         bool pair = k + 1 < nsteps && steps[k].k - steps[k + 1].k < 1e-3f;  // mirror-image moves in random order
         int first = pair && (xr() & 1) ? k + 1 : k;
-        if (try_step(x, y, steps[first]) || (pair && try_step(x, y, steps[first == k ? k + 1 : k]))) {
+        if (try_step(x, y, free, steps[first]) || (pair && try_step(x, y, free, steps[first == k ? k + 1 : k]))) {
           moves++;
           break;
         }
         k += pair;
       }
+    }
+  }
+  return moves;
+}
+
+// Rocks drop or roll one cell along gravity when the space is free; plant roots sit on the sand, rising when buried.
+static int decor_step(float gx, float gy) {
+  struct D { int x, y; float k; } d[8];
+  int n = 0, moves = 0;
+  for (int y = -1; y <= 1; y++)
+    for (int x = -1; x <= 1; x++) {
+      float k = (x * gx + y * gy) / sqrtf((float)(x * x + y * y));
+      if ((!x && !y) || k < 0.5f) continue;
+      int i = n++;
+      for (; i > 0 && d[i - 1].k < k; i--) d[i] = d[i - 1];
+      d[i] = {x, y, k};
+    }
+  for (int i = 0; i < 2; i++) {
+    auto &r = S.rock[i];
+    rock_mask(i, 0);
+    for (int k = 0; k < n; k++) {
+      bool pair = k + 1 < n && d[k].k - d[k + 1].k < 1e-3f;
+      int a = pair && (xr() & 1) ? k + 1 : k, b = a == k ? k + 1 : k;
+      int m = rock_fits(i, r.x + d[a].x, r.y + d[a].y) ? a : pair && rock_fits(i, r.x + d[b].x, r.y + d[b].y) ? b : -1;
+      if (m >= 0) {
+        r.x += d[m].x, r.y += d[m].y, moves++;
+        break;
+      }
+      k += pair;
+    }
+    rock_mask(i, ROCK);
+  }
+  for (auto &w : S.weed)
+    if (solid(w.x, w.y)) {
+      int nx = w.x - (int)lroundf(gx), ny = w.y - (int)lroundf(gy);
+      if (nx >= 0 && nx < CW && ny >= 0 && ny < CH) w.x = nx, w.y = ny, moves++;
+    } else {
+      for (int k = 0; k < n && d[k].k > 0.7f; k++)  // no sideways moves when upright: plants stay put on gentle slopes
+        if (!solid(w.x + d[k].x, w.y + d[k].y)) {
+          w.x += d[k].x, w.y += d[k].y, moves++;
+          break;
+        }
     }
   return moves;
 }
@@ -253,24 +346,30 @@ static int sand_step(float gx, float gy) {
 static void update_sand(float gx, float gy, float dt) {
   if (gx * gx + gy * gy < 0.09f) return;  // lying flat: the sand stays put
   float a = atan2f(gx, gy);
-  if (fabsf(wrapf(a - S.sand_rest)) > 0.05f) S.sand_awake = true;
+  if (fabsf(wrapf(a - S.sand_a)) > 0.06f) S.sand_a = a;  // a hand's tremor must not tip grains back and forth
+  a = S.sand_a;
+  if (!S.sand_awake && fabsf(wrapf(a - S.sand_rest)) > 0.05f) S.sand_awake = true, S.sand_idle = 0;  // reset, or it sleeps again unmoved
   if (!S.sand_awake) return;
   sand_steps(sinf(a), cosf(a));
-  for (S.sand_acc = fminf(3, S.sand_acc + dt * SAND_STEPS_PER_S); S.sand_acc >= 1; S.sand_acc--)
-    S.sand_idle = sand_step(sinf(a), cosf(a)) ? 0 : S.sand_idle + 1;
-  if (S.sand_idle > 3) S.sand_awake = false, S.sand_rest = a;
+  S.sand_acc += dt * SAND_STEPS_PER_S;
+  if (S.sand_acc >= 1) {  // one step a frame at most: a slow frame must not make the next one slower
+    S.sand_acc = fminf(S.sand_acc - 1, 1);
+    static int half;
+    S.sand_idle = sand_step(sinf(a), cosf(a), half ^= 1) + decor_step(sinf(a), cosf(a)) ? 0 : S.sand_idle + 1;
+  }
+  if (S.sand_idle > 5) S.sand_awake = false, S.sand_rest = a;
 }
 
 static void land(Dust &d) {  // back into the grid: the cell it is in, or the first free one above
   for (int k = 0; k < 10; k++) {
     int x = (int)(d.x - GX * k), y = (int)(d.y - GY * k);
     if (!solid(x, y)) {
-      G[y * CW + x] = d.grain;
+      put(y * CW + x, d.grain), count(x, y, 1);
       break;
     }
   }
   d.live = false;
-  S.sand_awake = true;
+  S.sand_awake = true, S.sand_idle = 0;
 }
 
 // ---- fish ----
@@ -289,7 +388,8 @@ static void stock() {
 static void init_scene();
 
 void pet_init(uint32_t now, uint8_t *scratch) {
-  G = scratch, moved = G + CW * CH, ovl = (uint16_t *)(G + 2 * CW * CH), spr = ovl + CW * CH;
+  ovl = (uint16_t *)scratch, spr = ovl + CW * CH;
+  for (int i = 0; i < CW * CH; i++) ovl[i] = KEY;
   S.last_ms = now;
   S.last_feed = S.last_approach = now - FEED_COOLDOWN;
   S.last_visitor = now - VISITOR_GAP;
@@ -454,8 +554,8 @@ void pet_update(const PetInput &in, PetOutput &out) {
   bool sleepy = S.light < 0.6f;
 
   // the surface stays perpendicular to gravity; spring + damping on its angle gives a little slosh
-  if (in.gx * in.gx + in.gy * in.gy > 0.09f) S.wa_target = atan2f(in.gx, in.gy);
-  S.wa_v += (wrapf(S.wa_target - S.wa) * 28 - S.wa_v * 3.5f) * dt;
+  if (float a = atan2f(in.gx, in.gy); in.gx * in.gx + in.gy * in.gy > 0.09f && fabsf(wrapf(a - S.wa_target)) > 0.035f) S.wa_target = a;
+  S.wa_v += (wrapf(S.wa_target - S.wa) * 28 - S.wa_v * 6) * dt;  // damped enough to settle in one slosh
   S.wa = wrapf(S.wa + S.wa_v * dt);
   GX = sinf(S.wa), GY = cosf(S.wa);
   solve_surface();
@@ -495,15 +595,15 @@ void pet_update(const PetInput &in, PetOutput &out) {
     int n = 0;
     for (int k = 0; k < 600 && n < DUST; k++) {
       int x = (int)(rnd() * CW), y = (int)(rnd() * CH);
-      uint8_t g = G[y * CW + x];
+      int g = cell(y * CW + x);
       if (!g || g == ROCK || solid((int)(x - GX * 1.5f), (int)(y - GY * 1.5f))) continue;
       while (n < DUST && S.dust[n].live) n++;
       if (n == DUST) break;
       float up = 12 + rnd() * 28, side = (rnd() - 0.5f) * 24;
-      S.dust[n] = {x + 0.5f, y + 0.5f, -GX * up + GY * side, -GY * up - GX * side, true, g};
-      G[y * CW + x] = 0;
+      S.dust[n] = {x + 0.5f, y + 0.5f, -GX * up + GY * side, -GY * up - GX * side, true, (uint8_t)g};
+      put(y * CW + x, 0), count(x, y, -1);
     }
-    S.sand_awake = true;
+    S.sand_awake = true, S.sand_idle = 0;
     for (auto &f : S.fish)
       if (f.state == ALIVE) startle(f, f.x + (rnd() - 0.5f) * 10, f.y + (rnd() - 0.5f) * 10, now);
     S.wa_v += (rnd() - 0.5f) * 1.5f;
@@ -617,7 +717,11 @@ void pet_update(const PetInput &in, PetOutput &out) {
 
   if (now > S.next_bubble) {
     for (auto &b : S.bubbles)
-      if (!b.live) { b = {24 + rnd() * 3, (float)SAND - 8, 1 + rnd() * 1.6f, rnd() * 6.28f, true}; break; }
+      if (!b.live) {  // the bubbler on top of the big rock
+        float o = rnd() * 3;
+        b = {S.rock[0].x - GX * 9 + GY * o, S.rock[0].y - GY * 9 - GX * o, 1 + rnd() * 1.6f, rnd() * 6.28f, true};
+        break;
+      }
     S.next_bubble = now + 250 + (uint32_t)(rnd() * 600);
   }
   for (auto &b : S.bubbles) {
@@ -632,7 +736,6 @@ void pet_update(const PetInput &in, PetOutput &out) {
 static uint16_t water_lut[256], ray_lut[256];
 static const uint16_t SURF_C = rgb(190, 235, 245);
 static uint16_t weed_c[4][72], weed_e[4][72];
-static const float WEED_X[] = {40, 32, 23, 13}, WEED_H[] = {58, 72, 50, 64}, WEED_P[] = {0, 1.7f, 3.1f, 4.4f};  // X from the right edge
 
 static void init_scene() {
   for (int i = 0; i < 256; i++) {
@@ -647,43 +750,48 @@ static void init_scene() {
     }
 }
 
-// Per pixel: sand grain, else air / surface / water by distance along gravity; the wave only near the surface.
+// Air / surface / water by distance along gravity (16.16 fixed point; floats only for the wave band), then sand rows.
+// The shade darkens away from the lamp on the lid, not with depth: turning the tank then repaints only the surface.
 static void draw_water(float t) {
-  uint16_t *p = C;
-  const uint8_t *g = G;
+  const int dd = (int)(GX * 65536);
   for (int y = 0; y < CH; y++) {
-    float d = GX * 0.5f + GY * (y + 0.5f) - SURF_S, u = GY * 0.5f - GX * (y + 0.5f);
-    int ray = (y / 2) % 46;  // static light rays: (x + y / 2) % 46 < 9
-    for (int x = 0; x < CW; x++, p++, g++, d += GX, u += GY) {
-      if (*g && *g != ROCK) {
-        *p = SANDC[*g & 3];
-      } else {
-        float e = d < -2 || d > 3 ? d : d - wave(u, t);
-        int k = (int)e;
-        *p = e < 0 ? AIR : e < 1 ? SURF_C : (ray < 9 ? ray_lut : water_lut)[k > 255 ? 255 : k];
-      }
+    uint16_t *row = C + y * CW;
+    float d0 = GX * 0.5f + GY * (y + 0.5f) - SURF_S, u0 = GY * 0.5f - GX * (y + 0.5f);
+    int di = (int)(d0 * 65536), ray = (y / 2) % 46, k = y - SURFACE < 1 ? 1 : y - SURFACE;  // static light rays: (x + y / 2) % 46 < 9
+    const uint16_t shade = water_lut[k], lit = ray_lut[k];
+    for (int x = 0; x < CW; x++, di += dd) {
+      uint16_t w = ray < 9 ? lit : shade;
       if (++ray == 46) ray = 0;
+      if (di < -2 * 65536) {
+        row[x] = AIR;
+      } else if (di <= 3 * 65536) {
+        float e = d0 + GX * x - wave(u0 + GY * x, t);
+        row[x] = e < 0 ? AIR : e < 1 ? SURF_C : w;
+      } else {
+        row[x] = w;
+      }
     }
+    if (row_n[y])
+      for (int x = 0; x < CW; x++)
+        if (int g = cell(y * CW + x); g && g != ROCK) row[x] = SANDC[g];
   }
-  ell(24, SAND + 1, 15, 9, OUTLINE);  // rocks with the bubbler on top
-  ell(24, SAND + 1, 14, 8, rgb(120, 125, 135));
-  ell(20, SAND - 3, 7, 3, rgb(150, 155, 165));
-  ell(44, SAND + 6, 8, 5, OUTLINE);
-  ell(44, SAND + 6, 7, 4, rgb(105, 110, 120));
+  for (int i = 1; i >= 0; i--) {  // rocks, big one in front with a highlight up and to the left
+    float x = S.rock[i].x, y = S.rock[i].y, rx = ROCK_R[i][0], ry = ROCK_R[i][1];
+    ell(x, y, rx, ry, OUTLINE);
+    ell(x, y, rx - 1, ry - 1, i ? rgb(105, 110, 120) : rgb(120, 125, 135));
+    bool side = fabsf(GX) > fabsf(GY);
+    if (!i) ell(x - 4 * GY - 4 * GX, y + 4 * GX - 4 * GY, side ? 3 : 7, side ? 7 : 3, rgb(150, 155, 165));
+  }
 }
 
-// Rooted where the sand started; the stem bends round to point against the water's down.
+// From the root on the sand straight up against the water's down, swaying sideways.
 static void draw_seaweed(float t) {
-  float bend = wrapf(S.wa);
+  const float sx = -GX, sy = -GY;
   for (int s = 0; s < 4; s++) {
-    float x = CW - WEED_X[s], y = sand_top((int)x), sx = 0, sy = -1;
+    float x = S.weed[s].x + 0.5f + GX, y = S.weed[s].y + 0.5f + GY;
     for (int i = 0; i < (int)WEED_H[s]; i++) {
-      if (i <= 24) {
-        float a = PI_F + bend * i / 24.0f;
-        sx = sinf(a), sy = cosf(a);
-      }
       x += sx, y += sy;
-      float f = i / WEED_H[s], sway = sinf(t * 1.2f + i * 0.08f + WEED_P[s]) * f * 4;
+      float f = i / WEED_H[s], sway = fsin(t * 1.2f + i * 0.08f + WEED_P[s]) * f * 4;
       float cx = x - sy * sway, cy = y + sx * sway;  // sideways is (-sy, sx)
       uint16_t c = weed_c[s][i], e = weed_e[s][i];
       for (int k = -1; k <= 2; k++) px((int)(cx - sy * k), (int)(cy + sx * k), k == -1 || k == 2 ? e : c);
@@ -820,7 +928,7 @@ static void draw_graph() {
   for (int y = Y0 - 1; y <= Y0 + GH; y++)
     for (int x = X0 - 1; x <= X0 + HIST; x++)
       if (y == Y0 - 1 || y == Y0 + GH || x == X0 - 1 || x == X0 + HIST) px(x, y, rgb(200, 225, 235));
-      else px(x, y, ((*at(x, y) & 0xF7DE) >> 1) + ((WHITE & 0xF7DE) >> 1));  // 50 % white without float maths
+      else if (x >= 0 && x < W && y < H) *at(x, y) = ((*at(x, y) & 0xF7DE) >> 1) + ((WHITE & 0xF7DE) >> 1);  // 50 % white, no floats
   int prev = -1;
   for (int i = 0; i < HIST; i++) {
     const auto &h = S.hist[(S.hist_i + i) % HIST];
@@ -895,23 +1003,35 @@ static void draw_bubble(uint32_t now) {
 // Copies pixels from src (rotated by angle a about (sx, sy)) onto the canvas around (X, Y); KEY stays transparent.
 static void blit(const uint16_t *src, int sw, int sh, float sx, float sy, float a, int x0, int y0, int x1, int y1, float X, float Y) {
   float c = cosf(a), s = sinf(a);
-  for (int y = y0 < 0 ? 0 : y0; y <= y1 && y < CH; y++)
-    for (int x = x0 < 0 ? 0 : x0; x <= x1 && x < CW; x++) {
-      float dx = x + 0.5f - X, dy = y + 0.5f - Y, u = dx * c + dy * s + sx, v = dy * c - dx * s + sy;
+  if (x0 < 0) x0 = 0;
+  if (x1 > CW - 1) x1 = CW - 1;
+  for (int y = y0 < 0 ? 0 : y0; y <= y1 && y < CH; y++) {
+    float dx = x0 + 0.5f - X, dy = y + 0.5f - Y, u = dx * c + dy * s + sx, v = dy * c - dx * s + sy;
+    uint16_t *d = C + y * CW + x0;
+    for (int x = x0; x <= x1; x++, d++, u += c, v -= s) {
       if (u < 0 || v < 0 || u >= sw || v >= sh) continue;
       uint16_t p = src[(int)v * sw + (int)u];
-      if (p != KEY) C[y * CW + x] = p;
+      if (p != KEY) *d = p;
     }
+  }
 }
 
-template <class F> static void creature(float X, float Y, F draw) {  // drawn upright in spr, turned by view
+static bool upright;  // view rests on a quarter turn: creatures go straight into the frame, no sprite
+template <class F> static void creature(float X, float Y, int half, F draw) {  // mid-turn: drawn upright in spr, turned by view
+  if (upright) {
+    float x, y;
+    to_frame(S.rot, X, Y, x, y);
+    frame(S.rot), draw((int)x, (int)y), frame(0);
+    return;
+  }
   uint16_t *canvas = C;
-  for (int i = 0; i < SP * SP; i++) spr[i] = KEY;
-  C = spr, W = H = SP, R = 0;
-  draw(SP / 2, SP / 2);
+  int n = 2 * (half < SP / 2 ? half : SP / 2);
+  for (int i = 0; i < n * n; i++) spr[i] = KEY;
+  C = spr, W = H = n, R = 0;
+  draw(n / 2, n / 2);
   C = canvas, frame(0);
   int x = (int)X, y = (int)Y;
-  blit(spr, SP, SP, SP / 2 + 0.5f, SP / 2 + 0.5f, view, x - SP / 2, y - SP / 2, x + SP / 2, y + SP / 2, x + 0.5f, y + 0.5f);
+  blit(spr, n, n, n / 2 + 0.5f, n / 2 + 0.5f, view, x - n / 2, y - n / 2, x + n / 2, y + n / 2, x + 0.5f, y + 0.5f);
 }
 
 void pet_draw(uint16_t *canvas, uint32_t now) {
@@ -921,6 +1041,9 @@ void pet_draw(uint16_t *canvas, uint32_t now) {
   frame(0);
   draw_water(t);
   draw_seaweed(t);
+  float turn = wrapf(view + S.rot * PI_F / 2);
+  bool turning = fabsf(turn) > 0.005f;  // HUD goes to a layer that turns with the creatures
+  upright = !turning;
 
   float rt = (now - S.ripple_t0) / 1000.0f;
   if (S.ripple_t0 && rt < 0.5f) {
@@ -931,17 +1054,17 @@ void pet_draw(uint16_t *canvas, uint32_t now) {
   for (auto &fl : S.flakes)
     if (fl.live) px((int)fl.x, (int)fl.y, fl.c), px((int)fl.x + 1, (int)fl.y, fl.c), px((int)fl.x, (int)fl.y + 1, mix(fl.c, OUTLINE, 0.3f));
 
-  creature(S.snail.x, S.snail.y, [&](int x, int y) { draw_snail(x, y, S.snail.dir); });
+  creature(S.snail.x, S.snail.y, 9, [&](int x, int y) { draw_snail(x, y, S.snail.dir); });
   for (auto &f : S.fish)
     if (f.state != GONE)
-      creature(f.x, f.y, [&](int x, int y) {
+      creature(f.x, f.y, (int)(1.7f * SPECIES[f.kind].rx * f.size + 5), [&](int x, int y) {
         Fish g = f;
         g.x = x, g.y = y;
         draw_fish(g, now, sleepy && f.state == ALIVE && now >= f.startle_until);
       });
 
   for (auto &d : S.dust)
-    if (d.live) px((int)d.x, (int)d.y, SANDC[d.grain & 3]);
+    if (d.live) px((int)d.x, (int)d.y, SANDC[d.grain]);
   for (auto &b : S.bubbles) {
     if (!b.live) continue;
     float o = sinf(t * 3 + b.phase) * 1.5f, x = b.x + GY * o, y = b.y - GX * o;
@@ -952,17 +1075,23 @@ void pet_draw(uint16_t *canvas, uint32_t now) {
     }
   }
   apply_light();
-  float turn = wrapf(view + S.rot * PI_F / 2);
-  bool turning = fabsf(turn) > 0.005f;  // HUD goes to a layer that turns with the creatures
-  if (turning) {
-    for (int i = 0; i < CW * CH; i++) ovl[i] = KEY;
-    C = ovl;
-  }
+  if (turning) C = ovl, bx0 = by0 = 1 << 20, bx1 = by1 = -1;  // ovl is all KEY; only the box drawn gets turned and wiped
   frame(S.rot);
   if (S.debug && !turning) draw_graph();  // the graph blends with the scene below, so it waits for the turn
   draw_lamp();
   draw_hud(now);
   draw_bubble(now);
   frame(0);
-  if (turning) C = canvas, blit(ovl, CW, CH, CW / 2.0f, CH / 2.0f, turn, 0, 0, CW - 1, CH - 1, CW / 2.0f, CH / 2.0f);
+  if (turning && bx1 >= 0) {
+    float c = cosf(turn), s = sinf(turn), lo_x = CW, hi_x = 0, lo_y = CH, hi_y = 0;
+    for (int k = 0; k < 4; k++) {  // the drawn box turned about the centre, where blit reads it from
+      float dx = (k & 1 ? bx1 + 1 : bx0) - CW / 2.0f, dy = (k & 2 ? by1 + 1 : by0) - CH / 2.0f;
+      float x = dx * c - dy * s + CW / 2.0f, y = dx * s + dy * c + CH / 2.0f;
+      lo_x = fminf(lo_x, x), hi_x = fmaxf(hi_x, x), lo_y = fminf(lo_y, y), hi_y = fmaxf(hi_y, y);
+    }
+    C = canvas;
+    blit(ovl, CW, CH, CW / 2.0f, CH / 2.0f, turn, (int)lo_x - 1, (int)lo_y - 1, (int)hi_x + 1, (int)hi_y + 1, CW / 2.0f, CH / 2.0f);
+    for (int y = by0; y <= by1; y++)
+      for (int x = bx0; x <= bx1; x++) ovl[y * CW + x] = KEY;
+  }
 }

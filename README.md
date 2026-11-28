@@ -16,17 +16,17 @@ A pixel-art aquarium on a 2.8" touch display. To feed the fish, you walk up to i
 - **Fish with needs.** Hungry fish chase the flakes and turn pale when they starve. A fish dies after 24 hours without food. Dead fish turn grey, roll belly up and float to the surface.
 - **Touch the glass.** A tap sends a ripple across the water and nearby fish dart away. Tap a dead fish to scoop it out. Tap the empty tank to stock five new fish.
 - **Remembers everything.** Fish state is saved to flash. After a power cut, the time spent powered off is caught up via NTP, so pulling the plug doesn't help.
-- **Real water and sand.** The surface stays level in any pose and sloshes back. The sand is a grain simulation: turn the device on its side or upside down and it slides over grain by grain and settles against the new bottom. Shake it and the top layer swirls up and sinks back.
-- **Turn it sideways.** Fish, snail, HUD and speech bubbles turn smoothly to stay upright for you; the seaweed bends round to float upwards.
+- **Real water and sand.** The surface stays level in any pose and sloshes back once. The sand is a grain simulation: tilt the device, turn it on its side or upside down and it slides over grain by grain into the new low corner. The rocks drop and roll with it, the plants ride on top of the sand and always grow upwards. Shake it and the top layer swirls up and sinks back. A hand's tremor is ignored, so nothing jitters while you hold it.
+- **Turn it sideways.** Fish, snail, HUD and speech bubbles turn smoothly to stay upright for you.
 - **Sleeps when nobody is around.** After 5 minutes without a touch, a phone or movement the screen fades out. Any of those wakes it; the first touch only wakes it.
 - **Day and night.** A tank lamp switches on at 07:00 and off at 22:00 local time; tap the lamp to switch it yourself. At night the tank and backlight dim and the fish sleep near the bottom.
 - **Offspring.** A fish that stays well fed for three days gets a baby, which grows to full size over two days.
 - **A snail** cleans up flakes that sink to the sand.
-- **Talking fish.** Every fish gets a name and a personality from Claude Haiku 5.5, and comments on what happens in speech bubbles: being fed, shaken, turned, tapped, the lights going out, a death or a baby, or nothing at all for a while. They chirp on the buzzer while they talk, except at night. Without an API key or internet they fall back to built-in lines.
+- **Talking fish.** Every fish gets a name and a personality from Claude Haiku 5.5, and comments on what happens in speech bubbles: being fed, shaken, turned, tapped, the lights going out, a death or a baby, or nothing at all for a while. They chirp on the buzzer while they talk, except at night. They speak up on their own only every few minutes. Without an API key or internet they fall back to built-in lines.
 - **Evening diary.** At 21:00 the fish write a short diary entry of the day and send it as a push notification.
 - **Visitor counter.** How many people walked up today.
-- **Web page** at `http://mini-pet.local/`: live view, feed and lamp buttons, food level, visitors, every fish with name, character and hunger, and a chat box to talk to them (the answer also appears on the device).
-- **Push notifications** via [ntfy](https://ntfy.sh) when the fish get hungry, are starving, die, or have a baby.
+- **Web page** at `http://mini-pet.local/`: live view, feed, lamp and sound buttons (sound off is remembered), food level, visitors, every fish with name, character and hunger, and a chat box to talk to them (the answer also appears on the device).
+- **Push notifications** via [ntfy](https://ntfy.sh) when the fish get hungry, are starving, die, or have a baby; at most one every 30 minutes, and a reboot doesn't repeat a hunger alert.
 - **Live signal graph.** Shows what the Bluetooth sensing sees. Tap the signal icon to hide or show it.
 - **Wireless.** Over-the-air updates and a network log, so once it's flashed it only needs power.
 
@@ -115,7 +115,7 @@ c++ -std=c++17 -O2 tools/preview.cpp -o preview
 | `LAMP_ON_MIN`, `LAMP_OFF_MIN`, `TIMEZONE` | `pet.cpp`, `mini_pet.ino` | 07:00, 22:00, Europe/Vienna |
 | `SCREEN_GX`, `SCREEN_GY` | `mini_pet.ino` | maps the IMU axes to the screen; flip a sign if the water tilts the wrong way |
 | orientation hysteresis | `mini_pet.ino` | another edge must point down clearly for 0.6 s before fish and HUD turn; lying flat keeps the current one |
-| `REPOSE`, `SAND_STEPS_PER_S` | `pet.cpp` | sand slides on slopes steeper than ~26°, 40 grain steps per second |
+| `REPOSE`, `SAND_STEPS_PER_S` | `pet.cpp` | sand slides on slopes steeper than ~17°; 60 half-grid steps per second, at most one a frame |
 | `SLEEP_MS` | `mini_pet.ino` | screen off after 5 min idle |
 
 ## Notes for ESP32-S3 RGB panels
@@ -123,17 +123,17 @@ c++ -std=c++17 -O2 tools/preview.cpp -o preview
 The RGB panel reads its frame buffer out of PSRAM continuously. With WiFi and BLE running, this board glitched until these changes:
 
 - **Draw small, write little.** The game draws a 120×160 canvas in internal RAM. Only canvas pixels that changed are written into the 480×640 frame buffer, each as a 4×4 block; the compare copy sits in PSRAM, because internal RAM is scarce with WiFi and BLE running.
-- **Lower pixel clock.** Waveshare's demo uses 30 MHz. 18 MHz still gives about 42 Hz refresh and leaves PSRAM bandwidth for everything else.
+- **Lower pixel clock.** Waveshare's demo uses 30 MHz. 15 MHz gives 36 Hz refresh and leaves PSRAM bandwidth for everything else. 18 MHz (42 Hz) left too little time per frame while the sand flowed, so the frame rate jumped between 42 and 21, which looks worse than a steady 36.
 - **Write after vsync.** Changes are written right after the panel's vsync, so they stay ahead of the scanline.
 - **Bounce buffers** of 20 lines, and `WiFi.persistent(false)` so the WiFi stack never writes to flash.
 - **GT911 touch:** hold INT low during reset, or its I2C address comes up as 0x5D or 0x14 at random.
 - **Panel ISR on core 0.** The bounce-buffer ISR copies the frame out of PSRAM nonstop and runs on the core that created the panel, so the panel is created on core 0 and the game keeps core 1 to itself.
-- **Cheap painting.** Water is coloured per pixel from a depth lookup along gravity, the wave only near the surface, and the sand grid sleeps once it has settled. Ellipses take one `sqrt` per row, overlays blend with bit tricks, and the push writes two pixels per 32-bit store.
-- **Paced by vsync.** The frame is pushed right after vsync and the next one is drawn while the panel scans out, giving 43 fps (the panel's refresh rate).
+- **Cheap painting.** Water is told from air per pixel in fixed point along gravity, with floats only near the surface for the wave. Its shade darkens away from the lamp on the lid, not with depth, so turning the tank repaints only the surface line instead of every water pixel. Fish are drawn straight into the canvas and go through a rotated sprite only during the 0.3 s turn; only the HUD's box turns with them. Ellipses take one `sqrt` per row, overlays blend with bit tricks, and the push writes two pixels per 32-bit store. `pet.cpp` builds at `-O2` instead of Arduino's `-Os`: 1.5x faster painting.
+- **Sand in internal RAM.** The grain grid is 2 bits a cell (4.8 KB), so it fits internal RAM; in PSRAM one step took 11 ms once WiFi ran. Each frame moves only every other line, grains read only the neighbours they could fall into, empty stretches are skipped four cells at a time, and the grid sleeps once it has settled.
+- **Paced by vsync.** The frame is pushed right after vsync and the next one is drawn while the panel scans out, giving 36 fps (the panel's refresh rate) even while the sand flows.
 - **Web server on core 0** with a mutex around the game state, so serving the 38 KB live frame never stalls the animation.
 - **QMI8658:** the accelerometer only produces data with Waveshare's CTRL7 = 0x43. A read of 0x8000 on every axis means no sample yet.
 - **TLS next to BLE.** With BLE running only ~22 KB of internal RAM is free in one block, and a TLS handshake fails. `BLE.end()` frees about 90 KB, so HTTPS calls run in short BLE pauses.
-- **Rotation is free.** Landscape is a 160×120 canvas, the same pixel count, so it reuses every buffer. The push maps each 4×4 block to the rotated position on the portrait panel.
 
 ## Layout
 

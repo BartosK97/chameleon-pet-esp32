@@ -119,7 +119,7 @@ static bool rgb_init() {
   static const int data[16] = {5, 45, 48, 47, 21, 14, 13, 12, 11, 10, 9, 46, 3, 8, 18, 17};
   esp_lcd_rgb_panel_config_t cfg = {};
   cfg.clk_src = LCD_CLK_SRC_PLL240M;
-  cfg.timings.pclk_hz = 18 * 1000 * 1000;  // ~42 Hz refresh; Waveshare's 30 MHz eats the PSRAM bandwidth WiFi+BLE need
+  cfg.timings.pclk_hz = 15 * 1000 * 1000;  // ~35 Hz: a turning frame (~22 ms) fits, so no 42/21 fps judder; less PSRAM scanout
   cfg.timings.h_res = LCD_W;
   cfg.timings.v_res = LCD_H;
   cfg.timings.hsync_pulse_width = 10;

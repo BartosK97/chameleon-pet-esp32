@@ -49,7 +49,7 @@ struct PetSave {
 };
 constexpr uint32_t PET_SAVE_MAGIC = 0xF15A0002;
 
-constexpr int PET_SCRATCH = CW * CH * 4 + 48 * 48 * 2;  // sand grid, turn layer, creature sprite
+constexpr int PET_SCRATCH = CW * CH * 2 + 48 * 48 * 2;  // turn layer, creature sprite
 void pet_init(uint32_t now, uint8_t *scratch);  // scratch: PET_SCRATCH bytes (PSRAM is fine)
 void pet_update(const PetInput &in, PetOutput &out);
 void pet_draw(uint16_t *canvas, uint32_t now);
